@@ -13,6 +13,11 @@
 #include "romfs_image.h"
 #include "romfs_identity.h"
 #include "player_env.h"
+#if TARGET_OS_TV
+#define DM_DATA_DIRECTORY NSCachesDirectory   // tvOS apps have no Documents to keep: Library/Caches holds the game files, the saves and the logs, and the system may purge it
+#else
+#define DM_DATA_DIRECTORY NSDocumentDirectory
+#endif
 #ifndef DM_PLAYER_BUILD
 #define DM_PLAYER_BUILD 0
 #endif
@@ -55,7 +60,7 @@ static NSArray<NSString *> *romfs_document_images(NSString *doc) {
 }
 static NSString *romfs_locate(NSString *prog) {   // prog: a game of several programs, the running program's folder in the app (p<N>); nil otherwise
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
+    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
     if (prog) {   // the program's files are in the app (Documents holds one image, one program's)
         NSString *p = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:prog], *img = [p stringByAppendingPathComponent:@"romfs.img"], *d = [p stringByAppendingPathComponent:@"romfs"];
         if (romfs_image_complete(img)) return img;
@@ -88,7 +93,7 @@ static NSString *romfs_locate(NSString *prog) {   // prog: a game of several pro
 static void aoc_locate(void) {
     if (getenv("DM_AOC_DIR")) return;
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
+    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
     for (NSString *d in @[[doc stringByAppendingPathComponent:@"aoc"], [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"aoc"]]) {
         BOOL dir = NO;
         if (![fm fileExistsAtPath:d isDirectory:&dir] || !dir) continue;
@@ -108,6 +113,9 @@ const char *front_ios_boot_message(void) { return g_boot_message[0] ? g_boot_mes
 const char *front_ios_device_check(void) {
     static char msg[320]; static int done;
     if (done++) return msg[0] ? msg : NULL;
+#if TARGET_OS_TV   // Apple TV 4K (A10X, A12, A15, A17 Pro): no BC formats; the host stores BC textures decompressed there (nvn_mtl.m no_bc)
+    return NULL;
+#endif
     id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the graphics layers take (mtl_init repeats this check for the other routes)
     if (gpu.supportsBCTextureCompression) return NULL;
     snprintf(msg, sizeof msg, "This device's GPU (%s) cannot read BC-compressed textures, which the games use. It needs an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later.",
@@ -127,7 +135,7 @@ static void romfs_identity_report(NSString *doc) {
 static NSString *program_env(void);
 static int boot_env(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
+    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0];
     NSString *res = NSBundle.mainBundle.resourcePath;
     for (NSString *d in @[@"save", @"temp"]) [fm createDirectoryAtPath:[doc stringByAppendingPathComponent:d] withIntermediateDirectories:YES attributes:nil error:nil];
     // Keep game files and scratch data out of device backups (Documents is backed up by default; a RomFS placed there is many GB). Saves, logs and the pipeline list stay in the backup
@@ -196,7 +204,7 @@ static int boot_env(void) {
 // Started from the record, the settings screen stays away (DM_LAUNCHER=0): the player is on the way into a game. Returns the program's dm folder (the host's modules folder), nil when its game files are missing
 static NSString *program_env(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0], *res = NSBundle.mainBundle.resourcePath;
+    NSString *doc = NSSearchPathForDirectoriesInDomains(DM_DATA_DIRECTORY, NSUserDomainMask, YES)[0], *res = NSBundle.mainBundle.resourcePath;
     NSString *dmdir = [res stringByAppendingPathComponent:@"dm"], *msl = [res stringByAppendingPathComponent:@"msl"], *prog = nil;
     NSString *plist = [NSString stringWithContentsOfFile:[dmdir stringByAppendingPathComponent:@"programs.txt"] encoding:NSUTF8StringEncoding error:nil];
     if (plist) {
@@ -227,7 +235,9 @@ static int g_boot_ok;
 
 static void *boot_thread(void *p) {
     (void)p;
+#if !TARGET_OS_TV
     static char alt[65536]; stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt}; sigaltstack(&ss, 0);   // crash printing must work on the host thread too
+#endif
     int rc = dm_main(g_argc, g_argv);
     fprintf(stderr, "boot: dm_main returned %d\n", rc);
     return NULL;
