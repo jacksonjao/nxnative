@@ -740,6 +740,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_account.c` answers with the local user's image, a plain 256x256 baseline JPEG of 670 bytes built into the host: the size is the image's, the copy what the buffer holds.
 - **Found on:** Burnout Paradise Remastered (`0100DBF01000A000`, no profile; [issue #1118](https://github.com/seedds/nxnative/issues/1118)), from the reporter's symbolized stack; not run here.
 
+### Players sharing a console's save
+
+- **Symptom:** with a save folder per player, Animal Crossing: New Horizons would give each one an island of their own, where a Switch has one island per console and a resident per user.
+- **Cause:** device save data belongs to the console, not to a user, and the host had one fixed user.
+- **Fix:** `dm_console_save_only` (`loader.c`, from `main`'s imports: device save data and no account save data) tells the two kinds apart. The Apple TV's player picker keeps such a game in one save folder and gives the host every name in `DM_USERS`, the one playing in `DM_NICK`. `hle_account.c` makes each name a user: the first has the fixed user, so a save made earlier stays with it, and the others a user hashed from the name, so a name keeps its user whatever else changes in the list. `ListAllUsers`, `GetUserCount`, `ListQualifiedUsers`, `GetUserExistence` and `GetNickname` answer for all of them. A game with account save data still sees one user and gets a folder per player: `dm_console_save_only` is false there and `DM_USERS` is not set.
+- **Check:** the rule on the game files: the Apple TV build of this game imports `MountDeviceSaveData` and not `MountSaveData`, Super Mario Odyssey the opposite. Both compile.
+- **Open:** no run yet. The first player's island and a second player moving in have not been tried on any device, and this game's first save, at the end of the first day, has not been reached on the Mac either.
+- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md).
+
 ### Mii database answered by the host
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.
