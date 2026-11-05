@@ -69,7 +69,29 @@ def host_sections(path):
     return sections
 
 
-def reference_assembly(reference, namespace, modules, output):
+def verify_reference_mod0(reference, module, text, writable, text_end):
+    offset, length = text
+    w_offset, w_length = writable
+    split = (text_end + 0x3fff) & ~0x3fff
+    if not 0 < split <= length or w_length > length - split:
+        raise ValueError(f'{module}: reference guest section does not match the declared layout')
+    # The loader uses a module-relative pointer. Its readonly view of the
+    # data range aliases the writable source, not the hole in __TEXT.
+    with reference.open('rb') as f:
+        f.seek(offset + 4)
+        mod0, = struct.unpack('<I', f.read(4))
+        if 8 <= mod0 <= split - 8:
+            position = offset + mod0
+        elif split <= mod0 <= split + w_length - 8:
+            position = w_offset + mod0 - split
+        else:
+            raise ValueError(f'{module}: MOD0 offset outside reference guest image')
+        f.seek(position)
+        if f.read(4) != b'MOD0':
+            raise ValueError(f'{module}: no MOD0 at declared reference guest offset')
+
+
+def reference_assembly(reference, namespace, modules, output, text_ends):
     if not re.fullmatch(r'[A-Za-z0-9]{2}', namespace or ''):
         raise ValueError('reference-host requires a two-character namespace')
     sections = host_sections(reference)
@@ -101,6 +123,8 @@ def reference_assembly(reference, namespace, modules, output):
                     left -= len(block)
             proof.append(dict(module=module, segment=old[0], section=old[1],
                               bytes=length, sha256=digest.hexdigest()))
+        verify_reference_mod0(reference, module, sections['__TEXT', '__dm'+namespace+module+'img'],
+                              sections['__DM'+namespace+module+'W', '__img'], text_ends[module])
         flags.append(f'-Wl,-segprot,__DM{module}W,rw,rw')
     output.write_text('\n'.join(lines)+'\n')
     return flags, proof
@@ -138,8 +162,18 @@ def build(args):
         asm = work / 'embed.S'
         reference_proof = None
         if args.reference_host:
+            text_ends = {}
+            for module in args.modules:
+                with (patched / f'{module}.fixups.tsv').open() as fixups:
+                    for line in fixups:
+                        fields = line.split()
+                        if len(fields) == 3 and fields[:2] == ['#', 'TEXT_END']:
+                            text_ends[module] = int(fields[2], 16)
+                            break
+                    else:
+                        raise ValueError(f'{module}: missing TEXT_END in fixups')
             flags, reference_proof = reference_assembly(args.reference_host.resolve(strict=True),
-                                                        args.namespace, args.modules, asm)
+                                                        args.namespace, args.modules, asm, text_ends)
         else:
             if args.namespace:
                 raise ValueError('namespace is only used with reference-host')
