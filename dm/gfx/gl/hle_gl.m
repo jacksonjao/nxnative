@@ -311,7 +311,7 @@ NAMES(rb_t, g_rbs, g_nrbs, g_caprbs)
 static rb_t *rb_of(GLuint n) { return n && n < g_nrbs ? g_rbs[n] : NULL; }
 
 typedef struct { int kind; GLuint name; int level, face; } att_t;   // kind 0 none, 1 texture, 2 renderbuffer; face: a cube face, an array layer or a 3D slice
-typedef struct { att_t col, depth, stencil; uint64_t gen; } fb_t;
+typedef struct { att_t col, depth, stencil; uint64_t gen; int bound; } fb_t;
 NAMES(fb_t, g_fbs, g_nfbs, g_capfbs)
 static fb_t *fb_of(GLuint n) { return n && n < g_nfbs ? g_fbs[n] : NULL; }
 
@@ -1228,6 +1228,12 @@ GL(glPushGroupMarkerEXT, void, GLsizei len, const GLchar *msg) { (void)len; (voi
 GL(glPopGroupMarkerEXT, void, void) {}
 GL(glObjectLabel, void, GLenum id, GLuint name, GLsizei len, const GLchar *label) { (void)id; (void)name; (void)len; (void)label; }
 
+// Keep the API identity with the current EGL handle, including when a game
+// makes its context current on a different thread.
+enum { EGL_CONTEXT_DESKTOP = 2, EGL_CONTEXT_ES3 = 5 };
+static _Thread_local struct { EGLDisplay display; EGLContext context; EGLSurface draw, read; } g_egl_current;
+static int gl_is_es3(void) { return (uintptr_t)g_egl_current.context == EGL_CONTEXT_ES3; }
+
 // ---------- Queries ----------
 static const char *const g_exts[] = {"GL_ARB_ES3_2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_texture_compression_bptc", "GL_ARB_texture_compression_rgtc",
     "GL_EXT_texture_compression_s3tc", "GL_EXT_texture_filter_anisotropic", "GL_ARB_vertex_array_object", "GL_ARB_direct_state_access", "GL_ARB_half_float_vertex",
@@ -1237,8 +1243,8 @@ GL(glGetString, const char *, GLenum n) {
     switch (n) {
         case GL_VENDOR: return "NVIDIA Corporation";
         case GL_RENDERER: return "NVIDIA Tegra X1 (nvgpu)/integrated (Metal)";
-        case GL_VERSION: return "4.5.0 NVIDIA 349.00";
-        case GL_SHADING_LANGUAGE_VERSION: return "4.50 NVIDIA";
+        case GL_VERSION: return gl_is_es3() ? "OpenGL ES 3.0" : "4.5.0 NVIDIA 349.00";
+        case GL_SHADING_LANGUAGE_VERSION: return gl_is_es3() ? "OpenGL ES GLSL ES 3.00" : "4.50 NVIDIA";
         case GL_EXTENSIONS: {   // the compatibility profile's one string
             static char all[1024]; if (!all[0]) for (int i = 0; i < NEXTS; i++) { strlcat(all, g_exts[i], sizeof all); strlcat(all, " ", sizeof all); }
             return all;
@@ -1250,9 +1256,9 @@ GL(glGetStringi, const char *, GLenum n, GLuint i) { return n == GL_EXTENSIONS &
 GL(glGetIntegerv, void, GLenum p, GLint *v) {
     switch (p) {
         case GL_NUM_EXTENSIONS: *v = NEXTS; return;
-        case GL_MAJOR_VERSION: *v = 4; return;
-        case GL_MINOR_VERSION: *v = 5; return;
-        case GL_CONTEXT_PROFILE_MASK: *v = 1; return;   // CONTEXT_CORE_PROFILE_BIT: what the games asked for (Digimon a 4.5 core context); LÖVE takes its core paths (the file header)
+        case GL_MAJOR_VERSION: *v = gl_is_es3() ? 3 : 4; return;
+        case GL_MINOR_VERSION: *v = gl_is_es3() ? 0 : 5; return;
+        case GL_CONTEXT_PROFILE_MASK: *v = gl_is_es3() ? 0 : 1; return;   // CONTEXT_CORE_PROFILE_BIT: what the games asked for (Digimon a 4.5 core context); LÖVE takes its core paths (the file header)
         case GL_CONTEXT_FLAGS: *v = 0; return;
         case GL_MAX_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: *v = 16384; return;
         case GL_MAX_3D_TEXTURE_SIZE: case GL_MAX_ARRAY_TEXTURE_LAYERS: *v = 2048; return;
@@ -1434,6 +1440,20 @@ GLB(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) {
     pass_end();
     [cb_get() encodeWaitForEvent:event value:serial];
 }
+GL(glGetSynciv, void, void *sync, GLenum pname, GLsizei size, GLsizei *length, GLint *values) {
+    uint64_t serial; int from_nvn; GLint value;
+    if (size < 0) { if (!g_gl_error) g_gl_error = 0x501; return; }
+    if (!gl_sync_info(sync, &serial, &from_nvn)) return;
+    switch (pname) {
+        case 0x9112: value = 0x9116; break;  // OBJECT_TYPE: SYNC_FENCE
+        case 0x9113: value = 0x9117; break;  // SYNC_CONDITION: GPU_COMMANDS_COMPLETE
+        case 0x9114: value = (!serial || (from_nvn ? mtl_wait(serial, 0) : g_ev.signaledValue >= serial)) ? 0x9119 : 0x9118; break;
+        case 0x9115: value = 0; break;       // SYNC_FLAGS
+        default: if (!g_gl_error) g_gl_error = 0x500; return;  // GL_INVALID_ENUM
+    }
+    if (size > 0) values[0] = value;
+    if (length) *length = size > 0;
+}
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     uint64_t serial; int from_nvn;
     if (!gl_sync_info(sy, &serial, &from_nvn)) return 0x911d;  // GL_WAIT_FAILED
@@ -1465,6 +1485,11 @@ GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { if (i < 16) memcpy(S.va[i], v, sizeof S.va[i]); }
 
 // ---------- Textures ----------
+// Sampler zero selects the parameters on the bound texture, the only
+// sampling state this layer supports. Reject names it cannot create.
+GL(glBindSampler, void, GLuint unit, GLuint sampler) {
+    if ((unit >= NUNITS || sampler) && !g_gl_error) g_gl_error = 0x501;  // GL_INVALID_VALUE
+}
 GL(glGenTextures, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_texs, &g_ntexs, &g_captexs, sizeof(tex_t)); }
 GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
     for (GLsizei i = 0; i < n; i++) {
@@ -1629,7 +1654,9 @@ GL(glGenFramebuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n;
 GLB(glDeleteFramebuffers, void, GLsizei n, const GLuint *f) {
     for (GLsizei i = 0; i < n; i++) { fb_t *x = fb_of(f[i]); if (!x) continue; if (P.open && P.fb == f[i]) pass_end(); if (g_pend_clear.fb == f[i]) g_pend_clear.bits = 0; free(x); g_fbs[f[i]] = NULL; if (S.fb == f[i]) S.fb = 0; }
 }
+GL(glIsFramebuffer, uint32_t, GLuint f) { fb_t *fb = fb_of(f); return fb && fb->bound; }
 GLB(glBindFramebuffer, void, GLenum target, GLuint f) {
+    fb_t *fb = fb_of(f); if (fb) fb->bound = 1;
     if (target != GL_DRAW_FRAMEBUFFER) S.read_fb = f;   // GL_FRAMEBUFFER binds both
     if (target == GL_READ_FRAMEBUFFER || f == S.fb) return;
     { static int on = -1; if (on < 0) on = getenv("DM_GL_FBLOG") != NULL; if (on) { uint32_t bw, bh; fb_size(f, &bw, &bh); GLOG("bind framebuffer %u %ux%u (was %u) after %llu draws", f, bw, bh, S.fb, (unsigned long long)g_n_draw); } }
@@ -1777,6 +1804,7 @@ static void sh_capture(const shader_t *s) {
 GL(glCreateShader, GLuint, GLenum type) {
     GLuint n = name_new((void ***)&g_sps, &g_nsps, &g_capsps, sizeof(sp_t)); g_sps[n]->s.type = type; return n;
 }
+GL(glIsProgram, uint32_t, GLuint pr) { return prog_of(pr) != NULL; }
 GL(glCreateProgram, GLuint, void) {
     GLuint n = name_new((void ***)&g_sps, &g_nsps, &g_capsps, sizeof(sp_t)); g_sps[n]->is_prog = 1; return n;
 }
@@ -2023,7 +2051,6 @@ static void frame_end(void) {
 EGL(eglGetDisplay, EGLDisplay, void *native) { (void)native; dev_init(); return (EGLDisplay)&g_egl; }
 // EGL current bindings belong to the calling thread, including an unbound
 // thread. Keep the handles from MakeCurrent rather than inventing a display.
-static _Thread_local struct { EGLDisplay display; EGLContext context; EGLSurface draw, read; } g_egl_current;
 static _Thread_local EGLint g_egl_error;
 EGL(eglGetCurrentDisplay, EGLDisplay, void) { return g_egl_current.display; }
 EGL(eglGetCurrentContext, EGLContext, void) { return g_egl_current.context; }
@@ -2077,8 +2104,14 @@ EGL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig cfg, EGLContext share,
     (void)d; (void)cfg;
     int major = 0, minor = 0; for (int i = 0; attr && attr[i] != 0x3038 && i < 32; i += 2) { if (attr[i] == 0x3098) major = attr[i + 1]; else if (attr[i] == 0x30fb) minor = attr[i + 1]; }
     if (share) RED1("shared EGL contexts are not implemented (one context)");
-    GLOG("EGL context: OpenGL %d.%d", major, minor);
-    return (EGLContext)(uintptr_t)2;
+    // Storm 4's Scaleform loader uses the default ES API and parses
+    // "OpenGL ES %d.%d". A desktop version leaves its glGetIntegerv dispatch
+    // slot empty, so a zero texture limit leads to an undersized decode buffer.
+    // Restrict the implicit ES context to the verified NSO; desktop callers
+    // still use the existing GL 4.5 identity and state.
+    int es3 = major == 3 && minor == 0 && !strcmp(dm_main_build(), "d3016fc0c0402dfb70fba6b826ea772f");
+    GLOG("EGL context: OpenGL%s %d.%d", es3 ? " ES" : "", major, minor);
+    return (EGLContext)(uintptr_t)(es3 ? EGL_CONTEXT_ES3 : EGL_CONTEXT_DESKTOP);
 }
 EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, const EGLint *attr) {
     (void)d; (void)cfg; (void)win; (void)attr; dev_init();
