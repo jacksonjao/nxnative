@@ -2,7 +2,7 @@
 // densely on devices that unpack BC6H. A guest 64 KiB page is copied into
 // private sparse Metal tiles; GPU-written data stays in those tiles until
 // the guest changes the backing mapping or writes the backing CPU pages.
-enum { LS_PAGE = 65536, LS_BATCH = 8 << 20, LS_HEAP = 384 << 20 };
+enum { LS_PAGE = 65536, LS_BATCH = 8 << 20, LS_HEAP = 384 << 20, LS_DETAIL = 160 << 20 };
 static const char ls_key;
 int nvn_sparse_pool(const void *pool);
 uint64_t nvn_sparse_gen(void);
@@ -16,8 +16,9 @@ void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n);
     id<MTLHeap> heap;
     NSMutableData *pages;
     uint64_t gen, stamp;
-    uint32_t resident;
-    BOOL initialized;
+    uint32_t resident, detail;
+    NSUInteger budget;
+    BOOL initialized, trimmed, revisit;
     _Atomic bool failed;
 }
 @end
@@ -118,16 +119,29 @@ static bool ls_stage(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacyS
     return true;
 }
 
-static bool ls_reserve(NvLegacySparse *s, unsigned tiles, int mode, NSUInteger tile_bytes) {
-    if (mode > 0 && (s->resident + tiles) * tile_bytes > LS_HEAP) return false;
-    if (mode > 0) s->resident += tiles;
-    if (mode < 0) s->resident -= tiles;
-    return true;
+static bool ls_fits(NvLegacySparse *s, unsigned tiles, NSUInteger tile_bytes, bool detail) {
+    return (s->resident + tiles) * tile_bytes <= s->budget &&
+           (!detail || (s->detail + tiles) * tile_bytes <= LS_DETAIL);
+}
+
+static void ls_account(NvLegacySparse *s, unsigned tiles, int mode, bool detail) {
+    if (mode > 0) { s->resident += tiles; if (detail) s->detail += tiles; }
+    if (mode < 0) { s->resident -= tiles; if (detail) s->detail -= tiles; }
+}
+
+static unsigned ls_tail_tiles(const tex_t *t, id<MTLTexture> mt, unsigned tail, MTLSize tile) {
+    unsigned total = 0;
+    for (unsigned l = tail; l < mt.mipmapLevelCount && l <= mt.firstMipmapInTail; l++) {
+        if (l == mt.firstMipmapInTail) { total++; break; }
+        unsigned w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u);
+        total += (unsigned)((w + tile.width - 1) / tile.width * ((h + tile.height - 1) / tile.height));
+    }
+    return total;
 }
 
 static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTLSize tile) {
     uint64_t gen = nvn_sparse_gen(), stamp = nvn_dirty_now();
-    if (s->initialized && gen == s->gen && stamp == s->stamp) return true;
+    if (s->initialized && gen == s->gen && stamp == s->stamp && !s->revisit) return true;
     uint32_t tw, th, td;
     int tail = nvn_tex_sparse_tiles(&t->d, &tw, &th, &td);
     unsigned mt_tail = (unsigned)mt.firstMipmapInTail;
@@ -160,9 +174,16 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
     bool ok = mapped && blocks && raw != MAP_FAILED;
     ls_batch batch = {0};
     const NSUInteger tile_bytes = g_dev.sparseTileSizeInBytes;
+    if (!tile_bytes) ok = false;
+    // NVN exposes more mapped compressed pages than this heap can hold after
+    // decoding. Keep the existing sparse texture live and leave excess pages
+    // unmapped, with a separate cap for high-detail levels to preserve coarse
+    // terrain. Reconsider skipped pages after an unmap actually frees space.
+    bool retry = s->revisit, trimmed = s->trimmed && !retry, freed = false;
+    const unsigned tail_tiles = ls_tail_tiles(t, mt, (unsigned)tail, tile);
     for (unsigned slice = 0; ok && slice < t->d.depth; slice++) {
         uint64_t addr = (uint64_t)(uintptr_t)t->mem + (uint64_t)slice * layer;
-        if (!nvn_sparse_since(t->pool, addr, layer, s->gen, s->stamp)) continue;
+        if (!retry && !nvn_sparse_since(t->pool, addr, layer, s->gen, s->stamp)) continue;
         uint8_t *live = mapped + slice * (layer / LS_PAGE);
         for (unsigned l = 0; ok && l < (unsigned)tail; l++) {
             unsigned nx = (t->d.width >> l) / tw, ny = (t->d.height >> l) / th;
@@ -170,38 +191,44 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
             for (unsigned y = 0; ok && y < ny; y++) for (unsigned x = 0; ok && x < nx; x++) {
                 size_t p = off / LS_PAGE + y * nx + x;
                 uint64_t a = addr + p * LS_PAGE;
-                if (!nvn_sparse_since(t->pool, a, LS_PAGE, s->gen, s->stamp)) continue;
+                if (!(retry && !live[p]) && !nvn_sparse_since(t->pool, a, LS_PAGE, s->gen, s->stamp)) continue;
                 bool present = nvn_sparse_mapped(t->pool, a, LS_PAGE);
                 int mode = (int)present - live[p];
                 if (!present && !mode) continue;
-                if (present) { nvn_sparse_protect(t->pool, a, LS_PAGE); if (nvn_sparse_copy(t->pool, raw, a, LS_PAGE)) continue; }
                 unsigned tiles = (unsigned)(tw / tile.width * (th / tile.height));
+                bool detail = l < 4;
+                if (mode > 0 && !ls_fits(s, tiles, tile_bytes, detail)) { trimmed = true; continue; }
+                if (present) { nvn_sparse_protect(t->pool, a, LS_PAGE); if (nvn_sparse_copy(t->pool, raw, a, LS_PAGE)) continue; }
                 ls_op op = {.pixels = MTLRegionMake2D(x * tw, y * th, tw, th), .level = l, .slice = slice, .mapping = mode};
-                ok = ls_reserve(s, tiles, mode, tile_bytes) && ls_stage(&batch, mt, tile, s, op, &page, 0, present ? raw : NULL, blocks);
-                if (ok) live[p] = present;
+                ok = ls_stage(&batch, mt, tile, s, op, &page, 0, present ? raw : NULL, blocks);
+                if (ok) { ls_account(s, tiles, mode, detail); live[p] = present; freed |= mode < 0; }
             }
         }
         uint64_t a = addr + tail_off;
-        if (!ok || !nvn_sparse_since(t->pool, a, LS_PAGE, s->gen, s->stamp)) continue;
-        bool present = nvn_sparse_mapped(t->pool, a, LS_PAGE);
         size_t p = tail_off / LS_PAGE;
+        if (!ok || (!(retry && !live[p]) && !nvn_sparse_since(t->pool, a, LS_PAGE, s->gen, s->stamp))) continue;
+        bool present = nvn_sparse_mapped(t->pool, a, LS_PAGE);
         int mode = (int)present - live[p];
         if (!present && !mode) continue;
+        if (mode > 0 && !ls_fits(s, tail_tiles, tile_bytes, false)) { trimmed = true; continue; }
         if (present) { nvn_sparse_protect(t->pool, a, LS_PAGE); if (nvn_sparse_copy(t->pool, raw + tail_off, a, LS_PAGE)) continue; }
         for (unsigned l = (unsigned)tail; ok && l < mt.mipmapLevelCount; l++) {
             unsigned w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u);
             if (!present && l > mt_tail) break;
-            unsigned tiles = l < mt_tail ? (unsigned)((w + tile.width - 1) / tile.width * ((h + tile.height - 1) / tile.height)) : 1;
             int map_mode = l <= mt_tail ? mode : 0;
             ls_op op = {.pixels = MTLRegionMake2D(0, 0, w, h), .level = l, .slice = slice, .mapping = map_mode};
-            ok = ls_reserve(s, tiles, map_mode, tile_bytes) && ls_stage(&batch, mt, tile, s, op, &t->d, l, present ? raw : NULL, blocks);
+            ok = ls_stage(&batch, mt, tile, s, op, &t->d, l, present ? raw : NULL, blocks);
         }
-        if (ok) live[p] = present;
+        if (ok) { ls_account(s, tail_tiles, mode, false); live[p] = present; freed |= mode < 0; }
     }
     if (raw != MAP_FAILED) munmap(raw, layer);
     free(blocks);
     if (ok) ok = ls_flush(&batch, mt, tile, s);
-    if (ok) { s->gen = gen; s->stamp = stamp; s->initialized = YES; }
+    if (ok) {
+        if (trimmed && !s->trimmed)
+            MLOG("Legacy sparse BC6H budget reached: keep %u mapped tiles, leave excess pages unmapped", s->resident);
+        s->trimmed = trimmed; s->revisit = trimmed && freed; s->gen = gen; s->stamp = stamp; s->initialized = YES;
+    }
     return ok;
 }
 
@@ -213,6 +240,7 @@ static id<MTLTexture> legacy_sparse_bc6h(const tex_t *t, id<MTLTexture> existing
     bool fresh = !mt;
     if (fresh) {
         s = [NvLegacySparse new];
+        s->budget = LS_HEAP;
         MTLHeapDescriptor *heap = [MTLHeapDescriptor new];
         heap.type = MTLHeapTypeSparse;
         heap.storageMode = MTLStorageModePrivate;

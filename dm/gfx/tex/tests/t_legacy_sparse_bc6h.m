@@ -130,12 +130,18 @@ int main(void) { @autoreleasepool {
     [fence commit]; [fence waitUntilCompleted];
     assert(state->heap.usedSize < resident && !atomic_load(&state->failed));
 
+    state->budget = state->resident * g_dev.sparseTileSizeInBytes;
     table[0].gen = ++generation;
     table[0].mapped = true;
+    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    assert(state->trimmed && !atomic_load(&state->failed));
+    assert(state->heap.usedSize < resident);
+    state->budget = LS_HEAP;
+    state->revisit = true; // Simulate a budget freed by another page.
     memset(table[0].data, 0x57, LS_PAGE);
     assert(legacy_sparse_bc6h(&t, mt) == mt);
     verify_region(mt, 0, region, &page, 0, table[0].data);
     assert(state->heap.usedSize == resident && !atomic_load(&state->failed));
-    puts("Legacy sparse BC6H: initial tile and all tail mips, dirty rewrite, unmap and remap verified.");
+    puts("Legacy sparse BC6H: initial tile and all tail mips, dirty rewrite, budget exhaustion, unmap and remap verified.");
     return 0;
 } }
