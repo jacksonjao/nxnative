@@ -747,8 +747,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### Metal frame scratch allocation under memory pressure
 
 - **Symptom:** `FATAL cannot allocate 30676992 bytes of frame scratch` during a geometry draw, followed by a host abort.
-- **Cause:** Metal returned no shared buffer for the capture. Completed arenas at or below 32 MiB could remain cached indefinitely, even when a fresh arena was needed. CPU memory headroom alone does not guarantee a new Metal allocation.
-- **Fix:** release only completed arenas and retry the allocation. If a geometry capture still cannot allocate, fall back from batched replay and try the existing primitive-preserving split for supported direct draws. When even that fails, report the affected draw rather than aborting the process. Unrelated required allocations retain their existing failure behavior.
+- **Cause:** Metal returned no shared buffer for the capture. Geometry capture also advanced the ordinary argument arena, so a burst could leave the next small allocation asking for a fresh 4 MiB block. Completed arena wrappers could stay autoreleased until the submission ended, retaining their buffers after cache eviction.
+- **Fix:** release the underlying buffers of completed arenas immediately and retry the allocation. The pressure-prone iOS game keeps an ordinary argument arena separate from geometry scratch. After an allocation failure, reclaim a preceding fence with a bounded wait and let small requests retry at page size. If a geometry capture still cannot allocate, fall back from batched replay and try the existing primitive-preserving split for supported direct draws. When even that fails, report the affected draw rather than aborting the process. Unrelated required allocations retain their existing failure behavior.
 - **Found on:** Crisis Core on iPhone Air after roughly ten minutes of gameplay. Its iOS release caps the idle arena cache at 96 MiB and opts into a 384 MiB Unreal texture streaming ceiling (`DM_UE_TEXTURE_POOL_MAX`) as extra headroom. No shader chain change. Replay of the original gameplay segment is pending.
 
 ### Split geometry primitive IDs

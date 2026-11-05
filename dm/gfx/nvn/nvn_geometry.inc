@@ -648,7 +648,7 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
             MLOG("[RED] geometry draw needs %llu MiB of scratch, above the 256 MiB bound", (unsigned long long)(total >> 20));
         return may_wait ? 0 : -1;
     }
-    id<MTLBuffer> scratch; size_t off = arena_try_alloc((size_t)total, &scratch);
+    id<MTLBuffer> scratch; size_t off = arena_try_alloc((size_t)total, &scratch, YES);
     if (off == SIZE_MAX) {
         free(order);
         // A batched draw can fall back to the normal per-draw path. On that
