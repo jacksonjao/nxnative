@@ -46,7 +46,12 @@ def repair(mesh, pixel):
     # The pixel body uses both XY components as interpolated texture
     # coordinates. Primitive register 0 exports only Y; vertex 1 carries
     # the two coordinates authored by this paired mesh program.
-    pixel = replace(pixel, 'm_31 [[user(locn0)]];', 'm_31 [[user(locn1)]];', 1)
+    # Keep the shared pixel entry unchanged: it also pairs with meshes that
+    # already export the correct varying at location 0.
+    if pixel.count('m_31 [[user(locn0)]];') != 1:
+        raise ValueError('unexpected shared pixel interface')
+    mesh = replace(mesh, 'p0 [[user(locn0)]];', 'p0 [[user(locn2)]];', 1)
+    mesh = replace(mesh, 'a1 [[user(locn1)]];', 'a1 [[user(locn0)]];', 1)
     return mesh, pixel
 
 
