@@ -769,7 +769,12 @@ NVN_NOPROTO(nvnSyncCreateGLSync, NVNboolean, const NVNsync *s, void **out) {
 }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) {
+    (void)q; (void)c; (void)f;
+    // A game can reuse the slot of a finalized interop sync. Tag the new
+    // NVN producer fence so its GL export can wait for the actual GPU copy.
+    *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 1, mtl_last_fence()};
+}
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
 NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) {

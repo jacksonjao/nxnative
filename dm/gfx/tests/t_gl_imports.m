@@ -114,9 +114,11 @@ int main(int argc, char **argv) {
     assert(init_sync(&nvn, NULL));
     assert(!export_fence(&nvn, &out) && !out);  // never fenced
     void (*fence_sync)(NVNqueue *, NVNsync *, NVNsyncCondition, int) = nvn_lookup("nvnQueueFenceSync");
+    void (*finish_sync)(NVNsync *) = nvn_lookup("nvnSyncFinalize");
+    // Naruto reuses a finalized interop slot directly as an NVN queue fence.
+    finish_sync(&nvn);
     fence_sync(NULL, &nvn, 0, 0);  // no submissions yet: value zero is complete
     assert(export_fence(&nvn, &out) && out);
-    void (*finish_sync)(NVNsync *) = nvn_lookup("nvnSyncFinalize");
     finish_sync(&nvn);
     int from_nvn;
     assert(gl_sync_info(out, &serial, &from_nvn) && from_nvn && !serial);
