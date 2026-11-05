@@ -2437,6 +2437,8 @@ static int legacy_initial_content(const tex_t *t, id<MTLTexture> mt) {
     if(reports++<8)MLOG("initial pool content: ser=%llu %ux%u format=%#x source=%s",(unsigned long long)t->serial,t->d.width,t->d.height,t->d.format,no_cpu?"CPU_NO_ACCESS":uncached?"CPU_UNCACHED":"CPU-flushed");
     return 1;
 }
+#include "nvn_legacy_sparse.inc"
+
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
 static _Thread_local bool g_texture_sampled;
@@ -2468,6 +2470,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         }
     }
     id have = tex_get(t->serial);
+    if (legacy_sparse_candidate(t)) return legacy_sparse_bc6h(t, have);
     if (!have && !packaged && sampled && on_sub_thread() && dm_sdk_ounce() && t->mem && t->pool &&
         t->d.samples <= 1 && t->d.target != NVN_TEXTURE_TARGET_BUFFER && !fmt_compressed(t->d.format) &&
         !(t->d.format >= NVN_FORMAT_STENCIL8 && t->d.format <= NVN_FORMAT_DEPTH32F_STENCIL8) &&
@@ -3920,7 +3923,7 @@ void mtl_prog_release(prog_t *p) { if (p->serial) serial_del(p->serial); }
 
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
-typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty; int view_pkg;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty)
+typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty, view_sparse_gen; int view_pkg, view_sparse;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty)
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *ar, *ar_of; uint64_t ar_rid; } treg_t;              // ar: the alpha-from-red view for the profile's alpha_from_red shaders (tex_alpha_red), ar_of = the view it was built from
 static treg_t *g_treg; static int g_ntreg;
@@ -4012,19 +4015,25 @@ void mtl_set_origin_lower_left(int on) { if (atomic_exchange(&g_origin_ll, on) !
 static int g_queue_origin_ll;   // SET_WINDOW_ORIGIN's raster flip is queue state, independent of later device-origin changes.
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
+static inline bool legacy_view_current(const treg_t *r, uint64_t sg, uint64_t dg) {
+    return r->view && r->view_ser == sg && (!r->view_pkg || r->view_dirty == dg) &&
+        (!r->view_sparse || r->view_sparse_gen == nvn_sparse_gen());
+}
 static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if (g_tpool_n && tid >= g_tpool_n) { if (!g_stat_tex_oob++) MLOG("池外贴图号 %d（池容量 %d）按空槽处理：读出 0", tid, g_tpool_n); return nil; }
     if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok) { RED_ONCE(10, "贴图号 %d 未登记", tid); return nil; }
     treg_t *rp = &g_treg[tid];
     uint64_t sg = g_ser_gen, dg = nvn_dirty_now();   // Take the generations first and then look up: if a change happens in between, the next time must take the slow path
-    if (rp->view && rp->view_ser == sg && (!rp->view_pkg || rp->view_dirty == dg)) return (__bridge id<MTLTexture>)rp->view;
+    if (legacy_view_current(rp, sg, dg)) return (__bridge id<MTLTexture>)rp->view;
     id<MTLTexture> v = (__bridge id<MTLTexture>)rp->view;
     // Guest writes (nvn_dirty_now) matter only to CPU-written textures: a texture that becomes CPU-written later bumps g_ser_gen once (mtl_tex_cpu_written), which sends its ID through here again.
     // Before, every guest write to any protected page sent every texture ID, render targets included, down this path
-    rp->view_pkg = (rp->t.has_layout || tex_cpu_written(rp->t.serial)) && rp->t.mem;
+    rp->view_sparse = legacy_sparse_candidate(&rp->t);
+    uint64_t sparse_gen = rp->view_sparse ? nvn_sparse_gen() : 0;
+    rp->view_pkg = rp->view_sparse || ((rp->t.has_layout || tex_cpu_written(rp->t.serial)) && rp->t.mem);
     if (v) {   // The serial table or guest memory has changed: check whether the base texture was re-uploaded and replaced; if so the view is invalidated
         id<MTLTexture> cur = tex_mtl(&rp->t);
-        if (cur == v || v.parentTexture == cur) { rp->view_ser = sg; rp->view_dirty = dg; return v; }
+        if (cur && (cur == v || v.parentTexture == cur)) { rp->view_ser = sg; rp->view_dirty = dg; rp->view_sparse_gen = sparse_gen; return v; }
         defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
     }
     treg_t r = *rp;
@@ -4081,12 +4090,12 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
                     : [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns)];
         if (!v) { RED_ONCE(11, "贴图视图建不出 id %d", tid); v = base; }
     }
-    rp->view = (void *)CFBridgingRetain(v); rp->view_rid = legacy_texture_rid(v); rp->view_ser = sg; rp->view_dirty = dg;
+    rp->view = (void *)CFBridgingRetain(v); rp->view_rid = legacy_texture_rid(v); rp->view_ser = sg; rp->view_dirty = dg; rp->view_sparse_gen = sparse_gen;
     return v;
 }
 // Hot-path object fetch: if the table entry is valid, return the table-held pointer directly (without ARC retain / autorelease), otherwise take the slow path to build / validate. Caller holds g_rmu.
 static inline __attribute__((always_inline)) void *tex_fast(int tid) {
-    if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == g_ser_gen && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) return g_treg[tid].view;
+    if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && legacy_view_current(&g_treg[tid], g_ser_gen, g_treg[tid].view_pkg ? nvn_dirty_now() : 0)) return g_treg[tid].view;
     return (__bridge void *)tex_by_id(tid);
 }
 // Some Z-A descriptors expose one ordinary 2D texture even though the translated sampling
@@ -4224,7 +4233,7 @@ static id<MTLTexture> tex_alpha_red(int tid, id<MTLTexture> t, uint64_t *rid) {
     *rid = r->ar_rid; return v;
 }
 static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void **out) {
-    if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == g_ser_gen && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) { if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
+    if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && legacy_view_current(&g_treg[tid], g_ser_gen, g_treg[tid].view_pkg ? nvn_dirty_now() : 0)) { if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
     id<MTLTexture> t = tex_by_id(tid); if (out) *out = (__bridge void *)t; return t ? legacy_texture_rid(t) : 0;
 }
 static MTLSamplerAddressMode wrapm(int w) {

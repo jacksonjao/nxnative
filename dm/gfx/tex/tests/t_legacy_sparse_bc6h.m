@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <objc/runtime.h>
 #include "nvn_tex.h"
 #include "nvn_bcdec.h"
 #include "nvn_deswizzle.h"
@@ -8,120 +9,132 @@
 #include <string.h>
 #include <sys/mman.h>
 
-int main(void) { @autoreleasepool {
-    nvn_texdesc guest = {.target = 4, .format = 0x50, .width = 8192, .height = 8192,
-                         .depth = 68, .levels = 12, .flags = 0x20};
-    uint32_t tw, th, td;
-    int tiled = nvn_tex_sparse_tiles(&guest, &tw, &th, &td);
-    assert(tiled == 6 && tw == 256 && th == 256 && td == 1);
-    nvn_texdesc page = {.target = 1, .format = guest.format, .width = tw, .height = th, .depth = 1, .levels = 1};
-    unsigned h, z;
-    nvn_tex_level_tiles(&guest, 0, &h, &z);
-    page.pkg_block_h = h + 1;
-    nvn_texlayout layout;
-    nvn_tex_layout(&page, &layout);
-    assert(layout.size == 65536 && z == 0);
+// Run the production uploader with a synthetic page table and the real GPU.
+#include <stdatomic.h>
+#include "nvn.h"
 
-    id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();
-    assert(gpu && [gpu supportsFamily:MTLGPUFamilyApple6]);
-    MTLHeapDescriptor *heapDesc = [MTLHeapDescriptor new];
-    heapDesc.type = MTLHeapTypeSparse;
-    heapDesc.storageMode = MTLStorageModePrivate;
-    heapDesc.size = 16 << 20;
-    id<MTLHeap> heap = [gpu newHeapWithDescriptor:heapDesc];
-    assert(heap);
-    MTLTextureDescriptor *desc = [MTLTextureDescriptor new];
-    desc.textureType = MTLTextureType2DArray;
-    desc.pixelFormat = MTLPixelFormatRGBA16Float;
-    desc.width = guest.width; desc.height = guest.height;
-    desc.arrayLength = guest.depth; desc.mipmapLevelCount = guest.levels;
-    desc.storageMode = MTLStorageModePrivate;
-    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
-    id<MTLTexture> texture = [heap newTextureWithDescriptor:desc];
-    assert(texture.isSparse && !heap.usedSize);
-    MTLSize tile = [gpu sparseTileSizeWithTextureType:desc.textureType pixelFormat:desc.pixelFormat sampleCount:1];
-    assert(tile.width && tile.height && !(tw % tile.width) && !(th % tile.height));
+typedef struct {
+    nvn_texdesc d;
+    nvn_texlayout L;
+    void *mem;
+    const void *pool;
+    uint64_t serial;
+} tex_t;
 
-    uint8_t *guest_page = malloc(layout.size);
-    uint8_t *linear = malloc(layout.size);
-    assert(guest_page && linear);
-    // Exercise the original tiled layout with valid, distinct BC6H blocks.
-    memset(guest_page, 0x21, layout.size);
-    for (size_t i = 0; i < layout.size; i += 16) guest_page[i + 1] = (uint8_t)(i >> 4);
-    assert(!nvn_deswizzle(&page, 0, 0, guest_page, linear, (size_t)tw * 4));
-    size_t row = tw * 8, bytes = row * th;
-    id<MTLBuffer> source = [gpu newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-    id<MTLBuffer> result = [gpu newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-    assert(source && result);
-    assert(!nvn_bc_decode(guest.format, linear, (size_t)tw * 4, tw, th, source.contents, row));
-    free(linear); free(guest_page);
+static id<MTLDevice> g_dev;
+static id<MTLCommandQueue> g_q;
+static uint64_t generation, dirty;
+typedef struct {
+    uint64_t at, gen, stamp;
+    bool mapped;
+    uint8_t data[65536];
+} guest_page;
+static guest_page table[2];
+int nvn_sparse_pool(const void *p) { return p == table; }
+uint64_t nvn_sparse_gen(void) { return generation; }
+static uint64_t nvn_dirty_now(void) { return dirty; }
+int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {
+    assert(pool == table && n == 65536);
+    for (unsigned i = 0; i < 2; i++) if (table[i].at == a) return table[i].mapped;
+    return 0;
+}
+int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) {
+    assert(pool == table);
+    for (unsigned i = 0; i < 2; i++)
+        if (table[i].at >= a && table[i].at - a < n &&
+            (table[i].gen > gen || (table[i].mapped && table[i].stamp > stamp))) return 1;
+    return 0;
+}
+uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
+    assert(nvn_sparse_mapped(pool, a, n));
+    for (unsigned i = 0; i < 2; i++) if (table[i].at == a) { memcpy(dst, table[i].data, n); return 0; }
+    return n;
+}
+void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { assert(nvn_sparse_mapped(pool, a, n)); }
+static int no_bc(void) { return 1; }
+static int on_sub_thread(void) { return 1; }
+static void res_add(id<MTLTexture> t) { assert(t.isSparse); }
+static void tex_put(uint64_t serial, id<MTLTexture> t) { assert(serial && t.isSparse); }
+static void tex_tag_format(id<MTLTexture> t, int format) { assert(t.isSparse && format == 0x50); }
+#define MLOG(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define RED_ONCE(tag, ...) MLOG(__VA_ARGS__)
+#include "../../nvn/nvn_legacy_sparse.inc"
 
-    id<MTLCommandBuffer> cb = [[gpu newCommandQueue] commandBuffer];
-    id<MTLResourceStateCommandEncoder> map = [cb resourceStateCommandEncoder];
-    MTLOrigin origin = MTLOriginMake(desc.width - tw, desc.height - th, 0);
-    [map updateTextureMapping:texture mode:MTLSparseTextureMappingModeMap
-                       region:MTLRegionMake2D(origin.x / tile.width, origin.y / tile.height, tw / tile.width, th / tile.height)
-                     mipLevel:0 slice:67];
-    [map endEncoding];
+static void verify_region(id<MTLTexture> mt, NSUInteger level, MTLRegion region,
+                          const nvn_texdesc *guest, unsigned guest_level, const uint8_t *raw) {
+    unsigned w = (unsigned)region.size.width, h = (unsigned)region.size.height;
+    size_t src_row = ((w + 3) / 4) * 16, row = (w * 8 + 255) & ~255u, bytes = row * h;
+    uint8_t *blocks = malloc(src_row * ((h + 3) / 4));
+    uint8_t *expected = calloc(1, bytes);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    assert(blocks && expected && result);
+    assert(!nvn_deswizzle(guest, guest_level, 0, raw, blocks, src_row));
+    assert(!nvn_bc_decode(guest->format, blocks, src_row, w, h, expected, row));
+    id<MTLCommandBuffer> cb = [g_q commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    MTLSize size = MTLSizeMake(tw, th, 1);
-    [blit copyFromBuffer:source sourceOffset:0 sourceBytesPerRow:row sourceBytesPerImage:bytes sourceSize:size
-               toTexture:texture destinationSlice:67 destinationLevel:0 destinationOrigin:origin];
-    [blit copyFromTexture:texture sourceSlice:67 sourceLevel:0 sourceOrigin:origin sourceSize:size
-                 toBuffer:result destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:bytes];
+    [blit copyFromTexture:mt sourceSlice:67 sourceLevel:level sourceOrigin:region.origin
+               sourceSize:region.size toBuffer:result destinationOffset:0
+      destinationBytesPerRow:row destinationBytesPerImage:bytes];
     [blit endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    assert(!cb.error && !memcmp(source.contents, result.contents, bytes));
-    assert(heap.usedSize == bytes);
-    printf("Guest page: %ux%u/%llu bytes. Legacy Metal tiles: %lux%lu. GPU allocated %lu bytes and read back slice 67. Guest/Metal tails start at %d/%lu.\n",
-           tw, th, (unsigned long long)layout.size, tile.width, tile.height, heap.usedSize, tiled, texture.firstMipmapInTail);
-    // The guest groups mips 6 and 7 in its tail. Metal still treats
-    // them as regular tiles, then maps one tail at its own level 8.
-    nvn_texlayout full;
-    nvn_tex_layout(&guest, &full);
-    uint8_t *layer = mmap(NULL, full.layer_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    assert(!cb.error);
+    for (unsigned y = 0; y < h; y++)
+        assert(!memcmp(expected + y * row, (uint8_t *)result.contents + y * row, w * 8));
+    free(blocks); free(expected);
+}
+
+int main(void) { @autoreleasepool {
+    g_dev = MTLCreateSystemDefaultDevice();
+    assert(g_dev && [g_dev supportsFamily:MTLGPUFamilyApple6]);
+    g_q = [g_dev newCommandQueue];
+    tex_t t = {.d = {.target = 4, .format = 0x50, .width = 8192, .height = 8192,
+                     .depth = 68, .levels = 12, .flags = 0x20},
+               .mem = (void *)0x100000000ull, .pool = table, .serial = 1};
+    nvn_tex_layout(&t.d, &t.L);
+    assert(legacy_sparse_candidate(&t));
+    uint64_t last_slice = (uint64_t)t.mem + 67 * t.L.layer_size;
+    table[0].at = last_slice + 1023 * LS_PAGE;
+    unsigned tail = 6;
+    size_t tail_off = nvn_tex_level_offset(&t.d, tail);
+    table[1].at = last_slice + tail_off;
+    for (unsigned i = 0; i < 2; i++) {
+        table[i].gen = ++generation;
+        table[i].mapped = true;
+        memset(table[i].data, 0x21, LS_PAGE);
+    }
+    id<MTLTexture> mt = legacy_sparse_bc6h(&t, nil);
+    assert(mt.isSparse);
+    NvLegacySparse *state = objc_getAssociatedObject(mt, &ls_key);
+    nvn_texdesc page = {.target = 1, .format = 0x50, .width = 256, .height = 256, .depth = 1, .levels = 1, .pkg_block_h = 4};
+    MTLRegion region = MTLRegionMake2D(8192 - 256, 8192 - 256, 256, 256);
+    verify_region(mt, 0, region, &page, 0, table[0].data);
+    size_t resident = state->heap.usedSize;
+    assert(resident && !atomic_load(&state->failed));
+    uint8_t *layer = mmap(NULL, t.L.layer_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(layer != MAP_FAILED);
-    size_t tail_start = nvn_tex_level_offset(&guest, tiled);
-    memset(layer + tail_start, 0x21, full.layer_size - tail_start);
-    NSUInteger tail_base = texture.firstMipmapInTail;
-    assert(tail_base >= (NSUInteger)tiled && tail_base < desc.mipmapLevelCount);
-    id<MTLCommandBuffer> tails = [[gpu newCommandQueue] commandBuffer];
-    map = [tails resourceStateCommandEncoder];
-    for (NSUInteger level = tiled; level < tail_base; level++) {
-        NSUInteger w = MAX(desc.width >> level, 1), h = MAX(desc.height >> level, 1);
-        [map updateTextureMapping:texture mode:MTLSparseTextureMappingModeMap
-                           region:MTLRegionMake2D(0, 0, (w + tile.width - 1)/tile.width, (h + tile.height - 1)/tile.height)
-                         mipLevel:level slice:67];
-    }
-    [map updateTextureMapping:texture mode:MTLSparseTextureMappingModeMap
-                       region:MTLRegionMake2D(0, 0, 1, 1) mipLevel:tail_base slice:67];
-    [map endEncoding];
-    blit = [tails blitCommandEncoder];
-    NSMutableArray<id<MTLBuffer>> *inputs = [NSMutableArray array], *outputs = [NSMutableArray array];
-    for (NSUInteger level = tiled; level < desc.mipmapLevelCount; level++) {
-        NSUInteger w = MAX(desc.width >> level, 1), h = MAX(desc.height >> level, 1);
-        size_t src_row = ((w + 3)/4) * 16, src_bytes = src_row * ((h + 3)/4), dst_row = w * 8, dst_bytes = dst_row * h;
-        uint8_t *blocks = malloc(src_bytes);
-        id<MTLBuffer> src = [gpu newBufferWithLength:dst_bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> dst = [gpu newBufferWithLength:dst_bytes options:MTLResourceStorageModeShared];
-        assert(blocks && src && dst);
-        assert(!nvn_deswizzle(&guest, (unsigned)level, 0, layer, blocks, src_row));
-        assert(!nvn_bc_decode(guest.format, blocks, src_row, (unsigned)w, (unsigned)h, src.contents, dst_row));
-        free(blocks);
-        [inputs addObject:src]; [outputs addObject:dst];
-        MTLSize mip = MTLSizeMake(w,h,1);
-        MTLOrigin zero = MTLOriginMake(0,0,0);
-        [blit copyFromBuffer:src sourceOffset:0 sourceBytesPerRow:dst_row sourceBytesPerImage:dst_bytes sourceSize:mip
-                   toTexture:texture destinationSlice:67 destinationLevel:level destinationOrigin:zero];
-        [blit copyFromTexture:texture sourceSlice:67 sourceLevel:level sourceOrigin:zero sourceSize:mip
-                     toBuffer:dst destinationOffset:0 destinationBytesPerRow:dst_row destinationBytesPerImage:dst_bytes];
-    }
-    [blit endEncoding]; [tails commit]; [tails waitUntilCompleted];
-    assert(!tails.error);
-    for (NSUInteger i = 0; i < inputs.count; i++)
-        assert(!memcmp(inputs[i].contents, outputs[i].contents, inputs[i].length));
-    assert(!munmap(layer, full.layer_size));
-    printf("Mips %d through %lu read back correctly after mapping the two different tails. Heap used %lu bytes.\n",
-           tiled, desc.mipmapLevelCount - 1, heap.usedSize);
+    memcpy(layer + tail_off, table[1].data, LS_PAGE);
+    for (unsigned l = tail; l < t.d.levels; l++)
+        verify_region(mt, l, MTLRegionMake2D(0, 0, 8192 >> l, 8192 >> l), &t.d, l, layer);
+    assert(!munmap(layer, t.L.layer_size));
+
+    memset(table[0].data + 1, 0x41, LS_PAGE - 1);
+    table[0].stamp = ++dirty;
+    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    verify_region(mt, 0, region, &page, 0, table[0].data);
+    assert(state->heap.usedSize == resident);
+
+    table[0].gen = ++generation;
+    table[0].mapped = false;
+    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    id<MTLCommandBuffer> fence = [g_q commandBuffer];
+    [fence commit]; [fence waitUntilCompleted];
+    assert(state->heap.usedSize < resident && !atomic_load(&state->failed));
+
+    table[0].gen = ++generation;
+    table[0].mapped = true;
+    memset(table[0].data, 0x57, LS_PAGE);
+    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    verify_region(mt, 0, region, &page, 0, table[0].data);
+    assert(state->heap.usedSize == resident && !atomic_load(&state->failed));
+    puts("Legacy sparse BC6H: initial tile and all tail mips, dirty rewrite, unmap and remap verified.");
     return 0;
 } }
-
