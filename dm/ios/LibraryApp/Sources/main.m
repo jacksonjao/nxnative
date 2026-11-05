@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <GameController/GCEventInteraction.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <stdbool.h>
 #include <errno.h>
@@ -428,7 +429,20 @@ UIViewController *TonTonLibraryController(void (^startGame)(NSString *titleID)){
 @property(nonatomic,strong)UIWindow *window;
 @end
 @implementation LibraryDelegate
-- (BOOL)application:(UIApplication *)a didFinishLaunchingWithOptions:(NSDictionary *)o{(void)a;(void)o;self.window=[[UIWindow alloc]initWithFrame:UIScreen.mainScreen.bounds];self.window.rootViewController=[LibraryView new];[self.window makeKeyAndVisible];return YES;}
+- (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)options {
+    (void)app; (void)options;
+    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    // The library and presented games share a window and read GameController profiles.
+    // Request delivery through those profiles even when UIKit holds the current responder.
+    if (@available(iOS 18.0, *)) {
+        GCEventInteraction *gamepadEvents = [GCEventInteraction new];
+        gamepadEvents.handledEventTypes = GCUIEventTypeGamepad;
+        [self.window addInteraction:gamepadEvents];
+    }
+    self.window.rootViewController = [LibraryView new];
+    [self.window makeKeyAndVisible];
+    return YES;
+}
 @end
 int main(int argc,char **argv){@autoreleasepool{return UIApplicationMain(argc,argv,nil,NSStringFromClass(LibraryDelegate.class));}}
 #endif
