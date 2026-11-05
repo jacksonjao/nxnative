@@ -17,18 +17,20 @@ uint64_t dm_ue_cvar(const char *name) {
 // ue_texture_pool: r.Streaming.PoolSize, the megabytes Unreal's texture streamer keeps resident; past it the streamer drops the top mips of the textures in view. The game's
 // device profile sets it (DRAGON QUEST VII Reimagined: 200 on the Switch, 1000 on Windows) and the streaming manager reads it again whenever it changes. The host raises a smaller
 // value the game sets to the target, whenever the game sets it back; a larger one, or -1 (no pool size: the engine sizes its pool otherwise), stays. The profile key applies on the
-// Mac; on iOS only DM_UE_TEXTURE_POOL turns it on (Documents/env.txt), until an iPhone run shows the memory fits. DM_UE_TEXTURE_POOL=0 leaves the game's value
+// Mac; on iOS only DM_UE_TEXTURE_POOL turns it on (Documents/env.txt), until an iPhone run shows the memory fits. DM_UE_TEXTURE_POOL=0 leaves the game's value. An explicit DM_UE_TEXTURE_POOL_MAX instead sets a ceiling.
 void dm_ue_cvar_tick(void) {
-    static int state = -1, target, nlog; static uint64_t obj_off; static const char *src;
+    static int state = -1, target, nlog, cap; static uint64_t obj_off; static const char *src;
     if (!state) return;
     if (state < 0) {
         state = 0;
-        const char *e = getenv("DM_UE_TEXTURE_POOL");
-        target = e ? atoi(e) : TARGET_OS_IPHONE ? 0 : DM_GAME_UE_TEXTURE_POOL; src = e ? "DM_UE_TEXTURE_POOL" : "game profile ue_texture_pool";
+        const char *e = getenv("DM_UE_TEXTURE_POOL_MAX");
+        cap = e && atoi(e) > 0;
+        if (!cap) e = getenv("DM_UE_TEXTURE_POOL");
+        target = e ? atoi(e) : TARGET_OS_IPHONE ? 0 : DM_GAME_UE_TEXTURE_POOL; src = cap ? "DM_UE_TEXTURE_POOL_MAX" : e ? "DM_UE_TEXTURE_POOL" : "game profile ue_texture_pool";
         if (target <= 0) { if (DM_GAME_UE_TEXTURE_POOL) LOG("main: Unreal r.Streaming.PoolSize left as the game sets it (%s)", e ? src : "iOS without DM_UE_TEXTURE_POOL"); return; }
         obj_off = dm_ue_cvar("r.Streaming.PoolSize");
         if (!obj_off) { LOG("[RED] main: Unreal r.Streaming.PoolSize not found in main by the rewriter (ue_cvar.py; %s %d MB not applied)", src, target); return; }
-        LOG("main: Unreal r.Streaming.PoolSize at main+%#llx, raised to %d MB (%s)", (unsigned long long)obj_off, target, src);
+        LOG("main: Unreal r.Streaming.PoolSize at main+%#llx, %s %d MB (%s)", (unsigned long long)obj_off, cap ? "capped at" : "raised to", target, src);
         state = 1;
     }
     uint8_t *base = NULL;
@@ -37,7 +39,10 @@ void dm_ue_cvar_tick(void) {
     if (!base || !rd((uint64_t)(uintptr_t)(base + obj_off + 0x10), &val, sizeof val) || !val) return;   // not created yet
     for (int c = 0; c < 2; c++) {
         int32_t cur, *p = (int32_t *)(uintptr_t)(val + 4 * (uint64_t)c);
-        if (!rd((uint64_t)(uintptr_t)p, &cur, sizeof cur) || cur <= 0 || cur >= target) continue;
+        if (!rd((uint64_t)(uintptr_t)p, &cur, sizeof cur)) continue;
+        // -1 lets Unreal choose a pool without the requested maximum. Zero is
+        // also unbounded in UE. Leave invalid negative sentinels untouched.
+        if (cap ? cur < -1 || (cur > 0 && cur <= target) : cur <= 0 || cur >= target) continue;
         dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, target, __ATOMIC_RELAXED);
         if (nlog < 8) { nlog++; LOG("main: Unreal r.Streaming.PoolSize (%s thread) %d → %d MB (%s)", c ? "render" : "game", cur, target, src); }
     }

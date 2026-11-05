@@ -648,7 +648,18 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
             MLOG("[RED] geometry draw needs %llu MiB of scratch, above the 256 MiB bound", (unsigned long long)(total >> 20));
         return may_wait ? 0 : -1;
     }
-    id<MTLBuffer> scratch; size_t off = arena_alloc((size_t)total, &scratch);
+    id<MTLBuffer> scratch; size_t off = arena_try_alloc((size_t)total, &scratch);
+    if (off == SIZE_MAX) {
+        free(order);
+        // A batched draw can fall back to the normal per-draw path. On that
+        // path, try the existing bounded geometry split instead of aborting.
+        if (!may_wait) return -1;
+        if (!g_geo_split_depth && geo_split(pr, dw0 ? &j->dw : NULL, dw0 ? NULL : &j->di,
+                                          count, instances, first_instance, primitive_base)) return 0;
+        static unsigned reports;
+        if (reports < 8) { reports++; MLOG("[RED] geometry draw skipped: no Metal frame scratch (%llu bytes)", (unsigned long long)total); }
+        return 0;
+    }
     uint8_t *cpu = (uint8_t *)scratch.contents + off; uint64_t gpu = scratch.gpuAddress + off;
     size_t used = 0;
     #define GEO_ALLOC(N, G, P) do { used = (used + 255) & ~(size_t)255; (G) = gpu + used; (P) = cpu + used; used += (size_t)(N); } while (0)

@@ -4865,13 +4865,31 @@ static inline __attribute__((always_inline)) void *samp_fast(int sid) {
 @interface NvArena : NSObject { @public id<MTLBuffer> buf; uint64_t gpu, fence; size_t used, len; } @end   // len: buf.length, kept so an allocation sends no message
 @implementation NvArena @end
 static NSMutableArray<NvArena *> *g_arenas; static NvArena *g_cur_arena; static NSMutableArray<NvArena *> *g_sub_arenas;
+// Keep only reusable buffers within the budget; a fence is published only
+// after the GPU has finished all reads from these shared buffers.
+static size_t arena_trim(uint64_t done, size_t budget) {
+    size_t kept = 0, released = 0;
+    for (NSUInteger i = g_arenas.count; i-- > 0;) {
+        NvArena *a = g_arenas[i];
+        if (!a->fence || a->fence > done) continue;
+        if (a->len <= budget - kept) { kept += a->len; continue; }
+        released += a->len;
+        res_remove(a->buf);
+        [g_arenas removeObjectAtIndex:i];
+    }
+    return released;
+}
 static NvArena *arena_new(size_t minimum) {
     // The for-in loop variable does not retain the object: take a strong reference first and then remove it from the array, otherwise what is returned after the array releases it is a dangling pointer
     NvArena *r = nil;   // the smallest one that fits, so the usual small requests do not keep a large scratch arena alive (ARENA_IDLE, arena_begin)
     for (NvArena *it in g_arenas) if (it->fence && it->fence <= g_done && it->len >= minimum && (!r || it->len < r->len)) r = it;
     if (r) { [g_arenas removeObject:r]; r->fence = 0; r->used = 0; return r; }
     NvArena *a = [NvArena new]; a->buf = [g_dev newBufferWithLength:MAX(minimum, 4u << 20) options:MTLResourceStorageModeShared];
-    if (!a->buf) MDIE("cannot allocate %zu bytes of frame scratch", minimum);
+    if (!a->buf && arena_trim(g_done, 0)) {
+        res_commit();
+        a->buf = [g_dev newBufferWithLength:MAX(minimum, 4u << 20) options:MTLResourceStorageModeShared];
+    }
+    if (!a->buf) return nil;
     a->gpu = a->buf.gpuAddress; a->len = a->buf.length; res_add(a->buf); g_arena_made++; return a;
 }
 // Arenas above ARENA_KEEP bytes are scratch for large one-off work (a geometry draw's capture, up to 256 MB each). They are kept for reuse while that work goes on and released once
@@ -4883,19 +4901,32 @@ void arena_begin(void) {
     if (!g_arenas) { g_arenas = [NSMutableArray array]; g_sub_arenas = [NSMutableArray array]; }
     g_cur_arena = nil;
     uint64_t done = g_done;   // read as the submission start does (its allocator and visibility ring)
+#if TARGET_OS_IOS
+    // Crisis Core holds large textures and cycles through mid-sized geometry
+    // arenas. Bound the idle cache without reducing any in-flight capacity.
+    if (!strcasecmp(DM_GAME_ID, "0100D09016C6A000")) arena_trim(done, 96u << 20);
+#endif
     for (NSUInteger i = g_arenas.count; i-- > 0;) { NvArena *a = g_arenas[i];
         if (a->fence && a->fence <= done && a->len > ARENA_KEEP && g_fence > a->fence + ARENA_IDLE) { res_remove(a->buf); [g_arenas removeObjectAtIndex:i]; } }
 }
 void arena_commit(uint64_t fence) { for (NvArena *a in g_sub_arenas) { a->fence = fence; [g_arenas addObject:a]; } [g_sub_arenas removeAllObjects]; g_cur_arena = nil; }
 // An unqualified id * out-parameter is __autoreleasing under ARC; __strong avoids autoreleasing the arena buffer at every allocation.
 // Measurements: docs/reference/frame-rate.md, Arena buffer ownership on allocation.
-static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
+static size_t arena_try_alloc(size_t n, __strong id<MTLBuffer> *buf) {
+    if (n > SIZE_MAX - 255) { *buf = nil; return SIZE_MAX; }
     n = (n + 255) & ~(size_t)255;
-    if (!g_cur_arena || g_cur_arena->used + n > g_cur_arena->len) {
-        pthread_mutex_lock(&g_mu); g_cur_arena = arena_new(n); pthread_mutex_unlock(&g_mu);
-        [g_sub_arenas addObject:g_cur_arena];
+    if (!g_cur_arena || n > g_cur_arena->len - g_cur_arena->used) {
+        pthread_mutex_lock(&g_mu); NvArena *next = arena_new(n); pthread_mutex_unlock(&g_mu);
+        if (!next) { *buf = nil; return SIZE_MAX; }
+        g_cur_arena = next;
+        [g_sub_arenas addObject:next];
     }
     size_t off = g_cur_arena->used; g_cur_arena->used += n; *buf = g_cur_arena->buf; return off;
+}
+static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
+    size_t off = arena_try_alloc(n, buf);
+    if (off == SIZE_MAX) MDIE("cannot allocate %zu bytes of frame scratch", n);
+    return off;
 }
 
 // ---------- Draw state ----------

@@ -42,6 +42,23 @@ HLE_FORCE_BIG("_ZN2nn3aoc16ListAddOnContentEPiii", "add-on content list: the own
 }
 // The event object is created on demand by the nn::os side table (not signaled), the game waiting on it only times out / gets not-signaled
 HLE_FORCE("_ZN2nn3aoc31GetAddOnContentListChangedEventEPNS_2os11SystemEventE", "add-on content change event, out of scope; bound to a kernel event, never signalled (the game polls it with TryWait and aborts if it is uninitialized)", void, h_aoc_GetEv, void *ev) { hle_bind_system_event(ev, 0); }
+// The purchase notification is asynchronous on Switch. Emiya's Unity
+// integration registers at boot even when there are no purchases or DLC.
+// The unhandled SDK function dereferences the absent aoc service object.
+// Bind a real, idle kernel event; no purchase is reported in offline mode.
+static _Alignas(16) uint8_t g_purchase_event[0x80];
+static pthread_mutex_t g_purchase_event_lock = PTHREAD_MUTEX_INITIALIZER;
+HLE_FORCE("_ZN2nn2ec24InitializePurchasedEventEv", "offline purchase notification; no pending purchases", Result, h_ec_InitPurchase, void) {
+    pthread_mutex_lock(&g_purchase_event_lock);
+    hle_bind_system_event(g_purchase_event, 1);
+    pthread_mutex_unlock(&g_purchase_event_lock);
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2ec17GetPurchasedEventEv", "bound idle purchase event", void *, h_ec_GetPurchase, void) {
+    h_ec_InitPurchase();
+    return g_purchase_event;
+}
+HLE_FORCE("_ZN2nn2ec22FinalizePurchasedEventEv", "offline purchase event stays idle until process exit", void, h_ec_FiniPurchase, void) {}
 HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListEv", "shop applet, out of scope; cut: no-op", void, h_ec_ShowShop, void) { DM_APPLET("shop"); LOG("ec::ShowShopAddOnContentList (cut)"); }
 // The other shop entry points (Engage's title menu item "DLC" calls ShowShopAddOnContentList(ApplicationId, UserHandle)): the original starts the shop applet through applet::CreateLibraryApplet,
 // the host has no applet proxy (oe initialization is a no-op), and the SDK reads through the null proxy and crashes (sdk+0x38660). All return void: as if the player closed the shop at once, the game goes back to its menu.

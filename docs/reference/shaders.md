@@ -744,6 +744,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): 129,032 triangles of one mesh (vertex `9214254d203a4e45`, geometry `cb17a9453d4789d0`, both from the default material) at the start of the first battle and in the scene after it; with the one-thread compaction each such frame took about 300 ms, now only the first is long (395 ms on the Mac, with two new pipelines and the scratch allocation).
 - **Note:** strips, fans and primitive restart are not split. Guest primitive numbering retains the original draw's offset across supported splits: [Split geometry primitive IDs](#split-geometry-primitive-ids).
 
+### Metal frame scratch allocation under memory pressure
+
+- **Symptom:** `FATAL cannot allocate 30676992 bytes of frame scratch` during a geometry draw, followed by a host abort.
+- **Cause:** Metal returned no shared buffer for the capture. Completed arenas at or below 32 MiB could remain cached indefinitely, even when a fresh arena was needed. CPU memory headroom alone does not guarantee a new Metal allocation.
+- **Fix:** release only completed arenas and retry the allocation. If a geometry capture still cannot allocate, fall back from batched replay and try the existing primitive-preserving split for supported direct draws. When even that fails, report the affected draw rather than aborting the process. Unrelated required allocations retain their existing failure behavior.
+- **Found on:** Crisis Core on iPhone Air after roughly ten minutes of gameplay. Its iOS release caps the idle arena cache at 96 MiB and opts into a 384 MiB Unreal texture streaming ceiling (`DM_UE_TEXTURE_POOL_MAX`) as extra headroom. No shader chain change. Replay of the original gameplay segment is pending.
+
 ### Split geometry primitive IDs
 
 - **Symptom:** a geometry shader that reads `PrimitiveID` repeats its visibility decisions or storage addresses after a large draw is split into compute dispatches.
