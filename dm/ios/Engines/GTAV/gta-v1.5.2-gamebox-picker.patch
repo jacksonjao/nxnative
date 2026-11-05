@@ -1,0 +1,77 @@
+--- a/app/App/TonTonEmbeddedEntry.swift
++++ b/app/App/TonTonEmbeddedEntry.swift
+@@ -11,21 +11,24 @@
+ final class TonTonGTAEmbeddedEntry: NSObject {
+     private static var controller: NativePortViewController?
+ 
+-    @objc(controllerForSlot:returnToLibrary:)
+-    static func controller(forSlot slot: String, returnToLibrary: @escaping () -> Void) -> UIViewController? {
+-        guard Thread.isMainThread else { return nil }
++    @objc(controllerForSlot:mode:options:returnToLibrary:)
++    static func controller(forSlot slot: String, mode: String, options: [String: String],
++                           returnToLibrary: @escaping () -> Void) -> UIViewController? {
++        guard Thread.isMainThread,
++              let selected: GameMode = ["story": .story, "sandbox": .sandbox][mode] else { return nil }
+         let documents = URL(fileURLWithPath: slot, isDirectory: true).appendingPathComponent("UserData", isDirectory: true)
+         let manifest = documents.appendingPathComponent("GTA V/data/manifest.json")
+         guard FileManager.default.isReadableFile(atPath: manifest.path) else { return nil }
+         if let previous = controller {
+-            previous.returnToGameBox = returnToLibrary
+-            return previous
++            if previous.startedInGameBox { return nil }
++            previous.returnToGameBox = nil
+         }
+         TTGTASetDocuments(documents.path)
+         GameSettings.applyExperimentalSwitches()
+         ModKeyRemap.apply()
+         let game = NativePortViewController()
+         game.returnToGameBox = returnToLibrary
++        game.configureGameBoxLaunch(mode: selected, options: options)
+         controller = game
+         return game
+     }
+--- a/app/App/NativePortViewController.swift
++++ b/app/App/NativePortViewController.swift
+@@ -190,6 +190,42 @@
+     private let gyro = GyroInput()
+     private var engineStarted = false
+     var returnToGameBox: (() -> Void)?
++    var startedInGameBox: Bool { engineStarted }
++    private var launchFromGameBox = false
++
++    func configureGameBoxLaunch(mode: GameMode, options: [String: String]) {
++        precondition(!isViewLoaded)
++        let settings = GameSettings.shared
++        settings.gameMode = mode
++        settings.sandboxMap = 0
++        if let value = options["GTA_FPS"].flatMap(Int.init), [0, 30, 60].contains(value) {
++            settings.frameRateCap = value
++        }
++        if let value = options["GTA_HEIGHT"].flatMap(Int.init), [480, 540, 640, 720, 900, 1080].contains(value) {
++            settings.renderHeight = value
++        }
++        let supported = ["GTA_TEXTURE_QUALITY": "textureQuality", "GTA_SHADOW_QUALITY": "shadowQuality",
++                         "GTA_REFLECTION_QUALITY": "reflectionQuality", "GTA_PARTICLE_QUALITY": "particleQuality",
++                         "GTA_GRASS_QUALITY": "grassQuality"]
++        var overrides = settings.graphicsOverrides
++        for (key, name) in supported {
++            if let value = options[key], let spec = GraphicsDetail.all.first(where: { $0.option == name }),
++               spec.values.contains(value) { overrides[name] = value }
++        }
++        settings.graphicsOverrides = overrides
++        launchFromGameBox = true
++    }
++
++    override func didMove(toParent parent: UIViewController?) {
++        super.didMove(toParent: parent)
++        guard parent != nil, launchFromGameBox else { return }
++        DispatchQueue.main.async { [weak self] in
++            guard let self, self.parent != nil, self.launchFromGameBox else { return }
++            self.launchFromGameBox = false
++            self.view.layoutIfNeeded()
++            self.startEngine()
++        }
++    }
+     /// The app was in the background at least once since it opened (the log's "App back in the foreground.").
+     private var wasInBackground = false
+     /// leftApp ran for the current time away (reset when the app is active again).

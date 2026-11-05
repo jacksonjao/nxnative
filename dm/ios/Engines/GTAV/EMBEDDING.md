@@ -19,3 +19,14 @@ The release-only GameBox touch-layout editor can be updated with
 `contrib/tonton/apply_per_title_touch_layout.py RELEASE_SOURCE_ROOT`
 against the version of the release source with `TouchLayoutEditor.h`.
 The library host must compile using the generated multi-title profile.
+
+
+For the release GameBox source with the existing Chinese mode picker,
+also apply `gta-v1.5.2-gamebox-picker.patch` after the embedded patch.
+Apply `contrib/tonton/gtav-release-shared-picker.patch` in the release
+GameBox source snapshot that already has `TonTonGTAVModeStorage.h` and
+the Air mode picker. Use these two optional overlays together; the
+older checked-in host still expects the base embedded entry point.
+The shared picker passes story or sandbox and the seven existing
+per-game graphics values to the embedded iPadOS 16 engine. It uses
+the same game directory and does not migrate or duplicate saves.
