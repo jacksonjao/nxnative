@@ -1426,6 +1426,7 @@ uint64_t mtl_sub_commit(void) {
 }
 
 uint64_t mtl_last_fence(void) { return g_fence; }
+void *mtl_sync_event(void) { return (__bridge void *)g_ev; }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
 int mtl_wait(uint64_t fence, uint64_t timeout_ns) {

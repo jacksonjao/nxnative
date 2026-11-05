@@ -40,6 +40,7 @@ void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Wri
 uint64_t mtl_sub_commit(void);
 
 uint64_t mtl_last_fence(void);                       // Fence value of the most recent submit (0 = never submitted)
+void *mtl_sync_event(void);                         // Borrowed Metal shared event for cross-queue waits
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete

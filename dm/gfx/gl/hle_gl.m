@@ -1390,7 +1390,6 @@ GL(glDeleteSync, void, void *handle) {
     if (s) free(s);
     else if (!g_gl_error) g_gl_error = 0x501;  // GL_INVALID_VALUE
 }
-void *mtl_sync_event(void);
 GLB(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) {
     (void)flags; (void)timeout;
     uint64_t serial; int from_nvn;
