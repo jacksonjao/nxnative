@@ -8,6 +8,12 @@ $(O)t_tex: t_tex.c ../nvn_deswizzle.c ../nvn_deswizzle.h ../../nvn/nvn_tex.c ../
 	$(CLANG) $(CFLAGS) -o $@ t_tex.c ../nvn_deswizzle.c ../../nvn/nvn_tex.c -lm
 $(O)t_fmt_mtl: t_fmt_mtl.m ../nvn_fmt_mtl.c ../nvn_fmt_mtl.h
 	$(CLANG) $(CFLAGS) -fobjc-arc -o $@ t_fmt_mtl.m ../nvn_fmt_mtl.c -framework Metal -framework Foundation
+$(O)t_legacy_sparse_bc6h: t_legacy_sparse_bc6h.m ../nvn_deswizzle.c ../nvn_deswizzle.h ../nvn_bcdec.c ../nvn_bcdec.h ../../nvn/nvn_tex.c ../../nvn/nvn_tex.h
+	$(CLANG) $(CFLAGS) -Werror -fobjc-arc -I.. -I../../nvn -I../../nvn/include -o $@ \
+	    t_legacy_sparse_bc6h.m ../nvn_deswizzle.c ../nvn_bcdec.c ../../nvn/nvn_tex.c -framework Metal -framework Foundation
+.PHONY: check_legacy_sparse_bc6h
+check_legacy_sparse_bc6h: t_legacy_sparse_bc6h
+	MTL_DEBUG_LAYER=1 ./t_legacy_sparse_bc6h
 run: t_tex t_fmt_mtl
 	./t_fmt_mtl && ./t_tex
 .PHONY: run
