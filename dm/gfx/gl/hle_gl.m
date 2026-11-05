@@ -114,6 +114,10 @@ enum {
     GL_FLOAT_VEC2 = 0x8b50, GL_FLOAT_VEC3, GL_FLOAT_VEC4, GL_INT_VEC2, GL_INT_VEC3, GL_INT_VEC4, GL_BOOL, GL_FLOAT_MAT2 = 0x8b5a, GL_FLOAT_MAT3, GL_FLOAT_MAT4, GL_SAMPLER_2D = 0x8b5e,
     GL_SAMPLER_3D, GL_SAMPLER_CUBE, GL_SAMPLER_2D_SHADOW = 0x8b62, GL_TEXTURE_2D_ARRAY = 0x8c1a, GL_TEXTURE_BINDING_2D_ARRAY = 0x8c1d,
     GL_READ_FRAMEBUFFER = 0x8ca8, GL_DRAW_FRAMEBUFFER, GL_READ_FRAMEBUFFER_BINDING, GL_RENDERBUFFER_SAMPLES, GL_FRAMEBUFFER_COMPLETE = 0x8cd5, GL_MAX_COLOR_ATTACHMENTS = 0x8cdf,
+    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE = 0x8cd0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+    GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL, GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE, GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER,
+    GL_FRAMEBUFFER_DEFAULT = 0x8218, GL_TEXTURE = 0x1702,
+    GL_RENDERBUFFER_DEPTH_SIZE = 0x8d54, GL_RENDERBUFFER_STENCIL_SIZE,
     GL_RENDERBUFFER_WIDTH = 0x8d42, GL_RENDERBUFFER_HEIGHT, GL_RENDERBUFFER_INTERNAL_FORMAT, GL_FRAMEBUFFER_SRGB = 0x8db9, GL_SAMPLER_2D_ARRAY = 0x8dc1,
     GL_UNSIGNED_INT_VEC2 = 0x8dc6, GL_UNSIGNED_INT_VEC3, GL_UNSIGNED_INT_VEC4, GL_TEXTURE_SWIZZLE_R = 0x8e42, GL_TEXTURE_SWIZZLE_A = 0x8e45,
     GL_ALREADY_SIGNALED = 0x911a, GL_TIMEOUT_EXPIRED, GL_CONDITION_SATISFIED, GL_CONTEXT_PROFILE_MASK = 0x9126,
@@ -314,7 +318,7 @@ typedef struct {
 NAMES(tex_t, g_texs, g_ntexs, g_captexs)
 static tex_t *tex_of(GLuint n) { return n && n < g_ntexs ? g_texs[n] : NULL; }
 
-typedef struct { int fmt; uint32_t w, h; __strong id<MTLTexture> tex; uint64_t gen; } rb_t;
+typedef struct { int fmt; uint32_t w, h; __strong id<MTLTexture> tex; uint64_t gen; GLenum internal_fmt; } rb_t;
 NAMES(rb_t, g_rbs, g_nrbs, g_caprbs)
 static rb_t *rb_of(GLuint n) { return n && n < g_nrbs ? g_rbs[n] : NULL; }
 
@@ -1695,6 +1699,16 @@ GL(glGetRenderbufferParameteriv, void, GLenum target, GLenum p, GLint *v) {
         case GL_RENDERBUFFER_SAMPLES: *v = 0; return;
         case GL_RENDERBUFFER_WIDTH: *v = r ? (GLint)r->w : 0; return;
         case GL_RENDERBUFFER_HEIGHT: *v = r ? (GLint)r->h : 0; return;
+        case GL_RENDERBUFFER_INTERNAL_FORMAT: *v = r ? (GLint)r->internal_fmt : 0; return;
+        case GL_RENDERBUFFER_DEPTH_SIZE:
+            switch (r ? r->internal_fmt : 0) {
+                case GL_DEPTH_COMPONENT16: *v = 16; return;
+                case GL_DEPTH_COMPONENT24: case GL_DEPTH24_STENCIL8: *v = 24; return;
+                case GL_DEPTH_COMPONENT32: case GL_DEPTH_COMPONENT32F: case GL_DEPTH32F_STENCIL8: *v = 32; return;
+                default: *v = 0; return;
+            }
+        case GL_RENDERBUFFER_STENCIL_SIZE:
+            *v = r && (r->internal_fmt == GL_STENCIL_INDEX8 || r->internal_fmt == GL_DEPTH24_STENCIL8 || r->internal_fmt == GL_DEPTH32F_STENCIL8) ? 8 : 0; return;
     }
     RED1("glGetRenderbufferParameteriv(%#x) not implemented", p); *v = 0;
 }
@@ -1705,7 +1719,7 @@ GLB(glRenderbufferStorage, void, GLenum target, GLenum ifmt, GLsizei w, GLsizei 
     @autoreleasepool {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:g_fmt[f].pf width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
-        r->tex = [g_dev newTextureWithDescriptor:td]; r->fmt = f; r->w = w; r->h = h; r->gen++;
+        r->tex = [g_dev newTextureWithDescriptor:td]; r->fmt = f; r->w = w; r->h = h; r->gen++; r->internal_fmt = ifmt;
     }
     OLOG("renderbuffer %u: %dx%d %s", S.rb, w, h, g_fmt[f].name);
 }
@@ -1730,6 +1744,47 @@ GL(glFramebufferTexture2D, void, GLenum target, GLenum att, GLenum textarget, GL
 GL(glFramebufferTextureLayer, void, GLenum target, GLenum att, GLuint t, GLint level, GLint layer) { fb_attach(target, att, 1, t, level, layer); }
 GL(glFramebufferTexture3D, void, GLenum target, GLenum att, GLenum textarget, GLuint t, GLint level, GLint z) { (void)textarget; fb_attach(target, att, 1, t, level, z); }
 GL(glFramebufferRenderbuffer, void, GLenum target, GLenum att, GLenum rbt, GLuint r) { (void)rbt; fb_attach(target, att, 2, r, 0, 0); }
+// Report the attachment actually bound; Naruto checks stencil and depth before a battle.
+GL(glGetFramebufferAttachmentParameteriv, void, GLenum target, GLenum attachment, GLenum p, GLint *v) {
+    GLenum error = 0x500;  // GL_INVALID_ENUM
+    if (!v || (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER)) goto fail;
+    GLuint name = target == GL_READ_FRAMEBUFFER ? S.read_fb : S.fb;
+    fb_t *f = fb_of(name);
+    const att_t *a;
+    if (!name) {
+        if (attachment != GL_BACK && attachment != GL_DEPTH && attachment != GL_STENCIL) goto fail;
+        if (p == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) { *v = GL_FRAMEBUFFER_DEFAULT; return; }
+        error = 0x502; goto fail;  // GL_INVALID_OPERATION
+    }
+    if (!f) { error = 0x502; goto fail; }
+    if (attachment == GL_COLOR_ATTACHMENT0) a = &f->col;
+    else if (attachment == GL_DEPTH_ATTACHMENT) a = &f->depth;
+    else if (attachment == GL_STENCIL_ATTACHMENT) a = &f->stencil;
+    else if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        if (f->depth.kind != f->stencil.kind || f->depth.name != f->stencil.name ||
+            f->depth.level != f->stencil.level || f->depth.face != f->stencil.face) { error = 0x502; goto fail; }
+        a = &f->depth;
+    } else goto fail;
+    if (p == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
+        *v = a->kind == 1 ? GL_TEXTURE : a->kind == 2 ? GL_RENDERBUFFER : 0; return;
+    }
+    if (p == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME) { *v = (GLint)a->name; return; }
+    if (a->kind == 1) {
+        tex_t *t = tex_of(a->name);
+        switch (p) {
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL: *v = a->level; return;
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+                *v = t && t->target == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + a->face : 0; return;
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+                *v = t && (t->target == GL_TEXTURE_2D_ARRAY || t->target == GL_TEXTURE_3D) ? a->face : 0; return;
+        }
+    } else error = 0x502;
+fail:
+    if (!g_gl_error) g_gl_error = error;
+}
+GL(glGetFramebufferAttachmentParameterivEXT, void, GLenum target, GLenum attachment, GLenum p, GLint *v) {
+    h_glGetFramebufferAttachmentParameteriv(target, attachment, p, v);
+}
 // A framebuffer's colour image: the texture, its level and its slice (a cube face or an array layer) or 3D slice
 static id<MTLTexture> fb_color(GLuint fb, int *level, int *slice) {
     *level = *slice = 0;

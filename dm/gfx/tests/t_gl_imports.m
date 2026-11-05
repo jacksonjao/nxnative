@@ -62,6 +62,34 @@ int main(int argc, char **argv) {
     GLsizei len = -1; GLchar log[2] = {'?', 0}; info(sh, sizeof log, &len, log); assert(!len && !log[0]);
     void (*delete)(GLuint) = import("glDeleteShader"); delete(sh); assert(!shader_of(sh));
 
+    // Naruto queries an empty stencil slot and then a combined depth/stencil
+    // renderbuffer while preparing a fight. Both loader spellings must work.
+    void (*query)(GLenum, GLenum, GLenum, GLint *) = import("glGetFramebufferAttachmentParameteriv");
+    void (*query_ext)(GLenum, GLenum, GLenum, GLint *) = h_eglGetProcAddress("glGetFramebufferAttachmentParameterivEXT");
+    assert(query_ext == import("glGetFramebufferAttachmentParameterivEXT"));
+    GLuint fbo, rb, depth_tex;
+    h_glGenFramebuffers(1, &fbo);
+    h_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+    query(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &value);
+    assert(value == 0 && h_glGetError() == 0);
+    h_glGenRenderbuffers(1, &rb);
+    h_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+    query_ext(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &value);
+    assert(value == GL_RENDERBUFFER);
+    query(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &value);
+    assert((GLuint)value == rb);
+    query(GL_READ_FRAMEBUFFER, GL_DEPTH, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &value);
+    assert(value == GL_FRAMEBUFFER_DEFAULT);
+    h_glGenTextures(1, &depth_tex);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_tex, 2);
+    query(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL, &value);
+    assert(value == 2);
+    query(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &value);
+    assert(value == 2 && h_glGetError() == 0x502);
+    h_glDeleteFramebuffers(1, &fbo);
+    h_glDeleteRenderbuffers(1, &rb);
+    h_glDeleteTextures(1, &depth_tex);
+
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
     unsigned count = 0;
