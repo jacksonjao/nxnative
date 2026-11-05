@@ -35,7 +35,7 @@ enum { CV_VP8, CV_VP9, CV_H264 };
 typedef struct {
     uint32_t magic, id; pthread_mutex_t mu; vpx_codec_ctx_t vpx; int vpx_ok; void *event; uint64_t submits, pictures;
     int codec; uint16_t w, h; mavc *avc; uint8_t *csd; size_t csd_n;   // H.264: VideoToolbox and the parameter sets Initialize gave
-    struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos; } buf[CV_BUFS];
+    struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos, bt709; } buf[CV_BUFS];
     uint32_t fifo[8], fhead, fcount;          // acquirable indices
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
     vpx_image_t *held[CV_HOLD]; int64_t held_ts[CV_HOLD]; uint8_t held_eos[CV_HOLD]; int nheld;
@@ -73,7 +73,7 @@ static void spt_fire(cv_dec *d, uint32_t i) {   // buffer i of d filled: signal 
         if (t && t->want.dec == d->id && t->want.idx == i && d->buf[i].filled_gen >= t->want.gen) { t->armed = 0; g_spt[k] = NULL; hle_signal_system_event(e); } }
     pthread_mutex_unlock(&g_spt_mu);
 }
-static void spt_unarm(void *e) { pthread_mutex_lock(&g_spt_mu); for (int k = 0; k < 64; k++) if (g_spt[k] == e) g_spt[k] = NULL; pthread_mutex_unlock(&g_spt_mu); SPT(e)->armed = 0; }
+static void spt_unarm(void *e) { pthread_mutex_lock(&g_spt_mu); for (int k = 0; k < 64; k++) if (g_spt[k] == e) g_spt[k] = NULL; SPT(e)->armed = 0; pthread_mutex_unlock(&g_spt_mu); }
 
 // Pictures and end of stream into the released buffers, in order (decoder lock held)
 static void drain(cv_dec *d) {
@@ -84,10 +84,10 @@ static void drain(cv_dec *d) {
             vpx_image_t *im = d->held[0]; int64_t ts = d->held_ts[0]; uint8_t eos = d->held_eos[0];
             memmove(d->held, d->held + 1, sizeof d->held[0] * (CV_HOLD - 1)); memmove(d->held_ts, d->held_ts + 1, sizeof d->held_ts[0] * (CV_HOLD - 1));
             memmove(d->held_eos, d->held_eos + 1, CV_HOLD - 1); d->nheld--;
-            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos;
+            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos; b->bt709 = im->cs == VPX_CS_BT_709;
             if (b->pool && b->pidx < b->pool->count) { if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", d->codec == CV_H264 ? "H.264" : d->codec == CV_VP8 ? "VP8" : "VP9", d->id, b->w, b->h, i);
-        } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }
+        } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; b->bt709 = 0; d->eos_pending = 0; }
         if (b->eos) LOG("[codec] %s decoder %u: end of stream after %llu pictures", d->codec == CV_H264 ? "H.264" : d->codec == CV_VP8 ? "VP8" : "VP9", d->id, (unsigned long long)d->pictures);
         b->filled = 1; b->filled_gen = b->gen;
         spt_fire(d, i);
@@ -273,11 +273,11 @@ static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
     drain(d);
     pthread_mutex_unlock(&d->mu);
 }
-static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) {
+static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i, uint32_t *cs) {
     cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS) return CV_R(2004);
     pthread_mutex_lock(&d->mu);
     int ok = d->buf[i].filled;
-    if (ok) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0; }
+    if (ok) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0; if (cs) *cs = d->buf[i].bt709; }
     pthread_mutex_unlock(&d->mu);
     return ok ? 0 : CV_NONE;
 }
@@ -298,7 +298,7 @@ static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] 
     HLE_FORCE(s_enc, "protected streams are not served", Result, h_cv_##tag##enc, void) { return cv_dec_encrypted(); } \
     HLE_FORCE(s_acq, "the oldest acquirable buffer and its sync handle", Result, h_cv_##tag##acq, uint32_t *idx, cv_sync *sync, void *t) { return cv_dec_acq(idx, sync, t); } \
     HLE_FORCE(s_rel, "the buffer waits for the next picture and is acquirable again", void, h_cv_##tag##rel, void *t, uint32_t i, cv_sync sync) { cv_dec_rel(t, i, sync); } \
-    HLE_FORCE(s_props, "the filled buffer's picture size, time and end of stream", Result, h_cv_##tag##props, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) { return cv_dec_props(w, h, cw, ch, ts, eos, t, i); }
+    HLE_FORCE(s_props, "the filled buffer's picture size, time and end of stream", Result, h_cv_##tag##props, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) { return cv_dec_props(w, h, cw, ch, ts, eos, t, i, NULL); }
 CV_FAMILY(vp9, CV_VP9, "_ZN2nn5codec29CalculateVp9DecoderWorkBufferEPmS1_mtt",
     "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
     "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
@@ -331,6 +331,24 @@ CV_FAMILY(h264, CV_H264, "_ZN2nn5codec30CalculateH264DecoderWorkBufferEPmS1_mtt"
     "_ZN2nn5codec30AcquireH264DecoderOutputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_15H264DecoderTypeE", "_ZN2nn5codec30ReleaseH264DecoderOutputBufferEPNS0_15H264DecoderTypeEjNS_2gs16NativeSyncHandleE",
     "_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj")
 #undef CV_FAMILY
+// Mario Kart World uses the SDK 21 movie ABI; older decoder symbols keep their original signatures.
+HLE_FORCE("_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj",
+          "the filled picture and its colour space (SDK 21)", Result, h_cv_vp8props_cs,
+          uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) {
+    return cv_dec_props(w, h, cw, ch, ts, eos, t, i, cs);
+}
+HLE_FORCE("_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj",
+          "the filled picture and its colour space (SDK 21)", Result, h_cv_vp9props_cs,
+          uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) {
+    return cv_dec_props(w, h, cw, ch, ts, eos, t, i, cs);
+}
+HLE_FORCE("_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj",
+          "the filled picture and its colour space (SDK 21)", Result, h_cv_h264props_cs,
+          uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) {
+    return cv_dec_props(w, h, cw, ch, ts, eos, t, i, cs);
+}
+HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", "decoded with VideoToolbox on the host", Result, h_cv_h264init_mm, void *t, uint64_t bs, uint64_t bs2, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out,
+          const void *csd, uint64_t csd_n) { (void)bs; (void)bs2; (void)refs; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, out, csd, csd_n); }
 HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
           "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out,
           uint32_t mode, const void *csd, uint64_t csd_n) {
@@ -371,13 +389,22 @@ HLE_FORCE("_ZN2nn6syncpt3sdk25InitializeMultiWaitHolderEPNS_2os19MultiWaitHolder
 HLE_FORCE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERKNS1_15SyncPointHandleE", "signalled when the decoder fills the awaited buffer",
           Result, h_spt_request, void *e, const cv_sync *s) {
     spt_unarm(e); hle_clear_system_event(e);
+    pthread_mutex_lock(&g_spt_mu);
     SPT(e)->want = *s; SPT(e)->armed = 1;
-    pthread_mutex_lock(&g_spt_mu); int k = 0; while (k < 64 && g_spt[k]) k++; if (k < 64) g_spt[k] = e; pthread_mutex_unlock(&g_spt_mu);
+    int k = 0; while (k < 64 && g_spt[k]) k++; if (k < 64) g_spt[k] = e; pthread_mutex_unlock(&g_spt_mu);
     if (k == 64) { LOG("[RED] nn::syncpt: more than 64 armed events: signalled at once"); hle_signal_system_event(e); return 0; }
     if (sync_reached(s)) { spt_unarm(e); hle_signal_system_event(e); }
     return 0;
 }
 HLE_FORCE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", "disarms the event", void, h_spt_cancel, void *e) { spt_unarm(e); hle_clear_system_event(e); }
+HLE_FORCE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", "whether the awaited buffer is filled", bool, h_spt_trywait, const void *e) {
+    const cv_spt *event = SPT(e);
+    pthread_mutex_lock(&g_spt_mu);
+    const bool armed = event->armed;
+    const cv_sync want = event->want;
+    pthread_mutex_unlock(&g_spt_mu);
+    return !armed || sync_reached(&want);
+}
 HLE_FORCE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", "destroys the event's SystemEvent", void, h_spt_destroy, void *e) {
     spt_unarm(e);
     static void (*destroy)(void *); if (!destroy && !(destroy = guest_sym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::DestroySystemEvent missing");

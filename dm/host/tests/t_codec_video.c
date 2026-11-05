@@ -90,7 +90,12 @@ int main(void) {
     for (int i = 0; i < 2; i++) { h_cv_vp9rel(dec, (uint32_t)i, sync); assert(!h_cv_vp9acq(&idx, &sync, dec)); }   // the last two waiting pictures go out
     h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && !h_gs_trywait(&sync));
     assert(!h_spt_request(spt, &sync) && !ev_set(spt) && SPT(spt)->armed);
+    assert(!h_spt_trywait(spt));
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false) && ev_set(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
+    assert(h_spt_trywait(spt));
+    uint32_t colour_space = UINT32_MAX;
+    assert(!h_cv_vp9props_cs(&w, &h, &cw, &ch, &colour_space, &ts, &eos, dec, 2));
+    assert(w == 16 && h == 16 && ts == 3000 && !eos && colour_space == 0);
 
     // End of stream with no data: the next released buffer carries it, with no picture
     assert(!h_cv_vp9submit(&id, dec, NULL, 0, 0, true) && d->eos_pending);
@@ -128,7 +133,7 @@ int main(void) {
     {   _Alignas(16) static uint8_t dh[0x400], ph[0x40], mh[64 * 64 * 4]; static uint8_t yuv[64 * 64 * 3 / 2];
         cv_pref p64 = h_cv_pref(64, 64, 3, 0);
         assert(!h_cv_poolsize(&size, &align, &p64, 1) && !h_cv_pool(ph, mh, size, &p64, 1, 0));
-        assert(!h_cv_h264init2(dh, 0x10000, 64, 64, 1, 1, 3) && cv_of(dh) && cv_of(dh)->codec == CV_H264 && cv_of(dh)->avc);
+        assert(!h_cv_h264init_mm(dh, 0x10000, 0, 64, 64, 1, 1, 3, h264, 33) && cv_of(dh) && cv_of(dh)->codec == CV_H264 && cv_of(dh)->avc);
         assert(!h_cv_h264reg(dh, 0, ph, 0) && !h_cv_h264acq(&idx, &sync, dh));
         h_cv_h264rel(dh, 0, sync); assert(!h_cv_h264acq(&idx, &sync, dh) && !h_gs_trywait(&sync));
         assert(!h_cv_h264submit(&id, dh, h264, sizeof h264, 5000000, true) && h_gs_trywait(&sync));   // end of stream: VideoToolbox gives its picture out

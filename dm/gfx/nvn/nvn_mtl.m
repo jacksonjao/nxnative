@@ -1834,6 +1834,17 @@ static _Atomic uint64_t g_ser_gen = 1;
 // and when the serial table replaces / deletes them it only drops its reference (defer_obj_unref), never removing them from the residency set. Entries go when their pool is finalized (mtl_alias_drop_pool)
 // or another texture takes over their storage (alias_take_over).
 typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; } alias_key;
+int dm_sdk_ounce(void);
+// The NVN2 movie compositor samples an sRGB object over the same storage as
+// its linear RGBA8 render target. Keep one Metal allocation and view it in the requested format.
+static MTLPixelFormat nvn2_rgba8_alias(alias_key *key) {
+    if (!key->pool || key->d.samples > 1 || !dm_sdk_ounce()) return MTLPixelFormatInvalid;
+    if (key->d.format == NVN_FORMAT_RGBA8_SRGB) {
+        key->d.format = NVN_FORMAT_RGBA8;
+        return MTLPixelFormatRGBA8Unorm_sRGB;
+    }
+    return key->d.format == NVN_FORMAT_RGBA8 ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatInvalid;
+}
 static nvn_hmap g_alias = {.klen = sizeof(alias_key)};
 static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → g_fence + 1 at its last lookup or creation (alias_take_over spares entries looked up lately)
 // Live GPU-only image descriptions, including those not used yet. A dynamic-resolution family declares its largest image before any particular resolution is used.
@@ -2746,6 +2757,13 @@ static int tex_cpu_content(const tex_t *t) {
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
+static _Thread_local bool g_texture_sampled;
+static id<MTLTexture> tex_mtl_sampled(const tex_t *t) {
+    g_texture_sampled = true;
+    id<MTLTexture> mt = tex_mtl(t);
+    g_texture_sampled = false;
+    return mt;
+}
 // A sparse texture is bound from its first level whose pages, and those of every smaller level, are all mapped: a view of levels [r, n) samples as with a minimum LOD of r.
 // The translator drops TEX's LOD clamp and residency predicate, so Monster Hunter Rise's streamed textures were sampled at levels it had not mapped yet; those read 0, which ASTC
 // decodes as its error colour (magenta clothes on the title screen). Single-layer 2D textures only; the view follows each upload, as the mappings change only with one
@@ -2811,6 +2829,8 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
     return mt;
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
+    const bool sampled = g_texture_sampled;
+    g_texture_sampled = false;
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "texture object no longer valid (magic %#x, first case ser=%llu): no MTLTexture created", t->magic, (unsigned long long)t->serial); return nil; }
@@ -2832,6 +2852,23 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         }
     }
     id have = tex_get(t->serial);
+    if (!have && !packaged && sampled && on_sub_thread() && dm_sdk_ounce() && t->mem && t->pool &&
+        t->d.samples <= 1 && t->d.target != NVN_TEXTURE_TARGET_BUFFER && !fmt_compressed(t->d.format) &&
+        !(t->d.format >= NVN_FORMAT_STENCIL8 && t->d.format <= NVN_FORMAT_DEPTH32F_STENCIL8) &&
+        !(t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) &&
+        !(t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR |
+                        NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))) {
+        alias_key key;
+        memset(&key, 0, sizeof key);
+        key.pool = (uint64_t)(uintptr_t)t->pool; key.off = t->off; key.d = t->d;
+        key.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
+        nvn2_rgba8_alias(&key);
+        pthread_mutex_lock(&g_smu); bool gpu_copy = hm_get_id(&g_alias, &key) != nil; pthread_mutex_unlock(&g_smu);
+        if (!gpu_copy && mem_any(t->mem, t->L.size)) {
+            mtl_tex_cpu_written(t);
+            packaged = 1;
+        }
+    }
     if (!packaged && !have && DM_GAME_TEX_DIRTY_UPLOAD && t->mem && on_sub_thread()) { int nvn_ft_written(const tex_t *); packaged = nvn_ft_written(t); }   // first use of a texture the CPU wrote since init without a flush (hle_nvn.c)
     if (!packaged && !have && on_sub_thread() && tex_cpu_content(t)) { mtl_tex_cpu_written(t); packaged = 1; }   // storage the CPU wrote before its first use (tex_cpu_content)
     if (packaged) {
@@ -2905,7 +2942,17 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     // IMAGE permits shader writes; it does not change storage. Xenoblade Chronicles 3's depth and stencil-sampling objects differ only by this flag. Separate Metal textures
     // made the stencil read zero and rejected every deferred-lighting pass. Actual image writes add Metal usage before opening their encoder (image_prepare).
     ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
+    alias_key original_key = ak;
+    MTLPixelFormat alias_format = nvn2_rgba8_alias(&ak);
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
+    if (shared && alias_format != MTLPixelFormatInvalid && ((id<MTLTexture>)shared).pixelFormat != alias_format) {
+        id<MTLTexture> view = [(id<MTLTexture>)shared newTextureViewWithPixelFormat:alias_format];
+        if (view) { res_add(view); tex_put(t->serial, view); return view; }
+        // A device that cannot create the view keeps a separate correctly typed texture.
+        if (original_key.d.format == NVN_FORMAT_RGBA8) original_key.d.format = 0x40000000 | NVN_FORMAT_RGBA8;
+        ak = original_key;
+        pthread_mutex_lock(&g_smu); shared = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu);
+    }
     if (shared) { tex_put(t->serial, shared); return shared; }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
@@ -4618,7 +4665,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
     }
     treg_t r = *rp;
-    id<MTLTexture> base = tex_mtl(&rp->t);
+    id<MTLTexture> base = tex_mtl_sampled(&rp->t);
     if (!base) return nil;
     v = base;
     // Channel swizzle: the view's if set, otherwise the one from texture building; identity builds no view (SMBW's font cache is (1 1 1 R): without the swizzle glyphs become white blocks).
