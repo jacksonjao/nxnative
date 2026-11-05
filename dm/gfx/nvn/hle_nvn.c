@@ -742,13 +742,29 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
 extern void *gl_host_export_nvn_fence(uint64_t serial) __attribute__((weak_import));
+extern int gl_host_get_fence(void *, uint64_t *, int *) __attribute__((weak_import));
+extern void *gl_host_export_gl_fence(uint64_t serial) __attribute__((weak_import));
+extern int gl_host_wait_fence(uint64_t serial, uint64_t timeout_ns) __attribute__((weak_import));
+enum { NVN_SYNC_FENCED_BY_GL = 3 };
+// The observed ABI passes the destination, device, GL handle and a status output.
+NVN_NOPROTO(nvnSyncInitializeFromFencedGLSync, NVNboolean, NVNsync *s, NVNdevice *d, void *gl, uint32_t *status) {
+    (void)d;
+    uint64_t fence; int from_nvn;
+    if (!s || !gl_host_get_fence || !gl_host_get_fence(gl, &fence, &from_nvn)) return 0;
+    *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), from_nvn ? 1 : NVN_SYNC_FENCED_BY_GL, fence};
+    if (status) *status = 0;  // success
+    return 1;
+}
 // The guest passes the NVN sync and a pointer to an output GLsync, which it then passes to glWaitSync.
 NVN_NOPROTO(nvnSyncCreateGLSync, NVNboolean, const NVNsync *s, void **out) {
     if (!out) return 0;
     *out = NULL;
     const sync_t *o = (const sync_t *)s;
     if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C') || !o->fenced || !gl_host_export_nvn_fence) return 0;
-    *out = gl_host_export_nvn_fence(o->fence);
+    if (o->fenced == NVN_SYNC_FENCED_BY_GL) {
+        if (!gl_host_export_gl_fence) return 0;
+        *out = gl_host_export_gl_fence(o->fence);
+    } else *out = gl_host_export_nvn_fence(o->fence);
     return *out != NULL;
 }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
@@ -756,7 +772,21 @@ NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
-NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
+NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) {
+    (void)q;
+    const sync_t *o = (const sync_t *)s;
+    // NVN's own fences are already ordered. A GL fence belongs to a different Metal queue.
+    // Wait for that event before accepting new work. Bound the wait if the GL producer never submits.
+    if (o->fenced == NVN_SYNC_FENCED_BY_GL) {
+        if (gl_host_wait_fence && gl_host_wait_fence(o->fence, 5 * 1000000000ull)) return 1;
+        static _Atomic int warned;
+        if (!atomic_exchange(&warned, 1)) LOG("[RED] NVN QueueWaitSync: GL producer did not signal its fence");
+        return 0;
+    }
+    static int once;
+    if (!o->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait");
+    return 1;
+}
 // ZCull data: the host does no ZCull, so there is nothing to save / restore
 NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
@@ -767,7 +797,8 @@ static _Atomic uint64_t g_sync_ns;
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
-    int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
+    int (*w)(uint64_t, uint64_t) = o->fenced == NVN_SYNC_FENCED_BY_GL ? gl_host_wait_fence : o->fenced == 2 ? mtl_wait_acq : mtl_wait;
+    if (!w) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;

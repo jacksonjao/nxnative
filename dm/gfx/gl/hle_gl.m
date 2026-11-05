@@ -1391,6 +1391,23 @@ static void *gl_sync_make(uint64_t serial, int from_nvn) {
 }
 // An exported NVN fence owns a new GL handle; finalizing either object does not invalidate the other.
 void *gl_host_export_nvn_fence(uint64_t serial) { return gl_sync_make(serial, 1); }
+// Import the producer's value rather than borrowing the GL handle; the game can delete that handle immediately.
+int gl_host_get_fence(void *handle, uint64_t *serial, int *from_nvn) {
+    const GLenum previous_error = g_gl_error;
+    int found = gl_sync_info(handle, serial, from_nvn);
+    g_gl_error = previous_error;  // an NVN call must not set the GL thread's error flag
+    return found;
+}
+void *gl_host_export_gl_fence(uint64_t serial) { return gl_sync_make(serial, 0); }
+int gl_host_wait_fence(uint64_t serial, uint64_t timeout_ns) {
+    id<MTLSharedEvent> event = g_ev;
+    if (!event) return 0;
+    if (event.signaledValue >= serial) return 1;
+    if (!timeout_ns) return 0;
+    uint64_t ms = timeout_ns / 1000000;
+    if (ms > 3600000) ms = 3600000;
+    return [event waitUntilSignaledValue:serial timeoutMS:ms ? ms : 1];
+}
 GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
     (void)cond; (void)flags;
     return gl_sync_make(g_serial, 0);

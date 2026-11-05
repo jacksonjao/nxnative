@@ -151,6 +151,23 @@ int main(int argc, char **argv) {
         fini_tex(&tex);
         assert(tex_of(name)->tex == image);
         h_glDeleteTextures(1, &name);
+        NVNboolean (*import_fence)(NVNsync *, NVNdevice *, void *, uint32_t *) = nvn_lookup("nvnSyncInitializeFromFencedGLSync");
+        NVNsyncWaitResult (*wait_sync)(const NVNsync *, uint64_t) = nvn_lookup("nvnSyncWait");
+        NVNboolean (*wait_queue)(NVNqueue *, const NVNsync *) = nvn_lookup("nvnQueueWaitSync");
+        uint32_t status = UINT32_MAX;
+        assert(!import_fence(&nvn, NULL, &foreign, &status));
+        assert(!h_glGetError());
+        void *gl_fence = h_glFenceSync(0x9117, 0);
+        assert(import_fence(&nvn, NULL, gl_fence, &status) && !status);
+        assert(wait_sync(&nvn, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+        h_glDeleteSync(gl_fence);
+        h_glFlush();
+        assert(wait_queue(NULL, &nvn));
+        assert(wait_sync(&nvn, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+        assert(export_fence(&nvn, &out) && out != gl_fence);
+        finish_sync(&nvn);
+        assert(h_glClientWaitSync(out, 0, 0) == GL_ALREADY_SIGNALED);
+        h_glDeleteSync(out);
         defaults(&tb);
         assert(!get_name(&tb));
     }
