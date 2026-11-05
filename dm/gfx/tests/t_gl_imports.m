@@ -1,6 +1,7 @@
 // Direct GL imports and eglGetProcAddress must reach the same implementations (issue #228), including big-stack entries.
 #include "../gl/hle_gl.m"
 #include <assert.h>
+#include "../nvn/nvn_protos.h"
 
 uint64_t resolve_import(module_t *m, const char *name);
 int hle_implements(const char *name);
@@ -94,12 +95,34 @@ int main(int argc, char **argv) {
     h_glDeleteSync(NULL); assert(h_glGetError() == 0);
     void *sync = h_glFenceSync(0x9117, 0);
     uint64_t serial;
-    assert(gl_sync_serial(sync, &serial) && serial == g_serial);
+    assert(gl_sync_info(sync, &serial, NULL) && serial == g_serial);
     h_glDeleteSync(sync); assert(h_glGetError() == 0);
     void *next_sync = h_glFenceSync(0x9117, 0); assert(next_sync != sync);
     assert(h_glClientWaitSync(sync, 0, 0) == 0x911d && h_glGetError() == 0x501);
     h_glWaitSync(&foreign, 0, UINT64_MAX); assert(h_glGetError() == 0x501);
     h_glDeleteSync(next_sync); assert(h_glGetError() == 0);
+    const hle_force_ent *forced = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+    void *(*nvn_lookup)(const char *) = NULL;
+    for (unsigned long i = 0; i < sz / sizeof *forced; i++)
+        if (!strcmp(forced[i].name, "nvnBootstrapLoader")) nvn_lookup = forced[i].fn;
+    assert(nvn_lookup);
+    NVNboolean (*export_fence)(const NVNsync *, void **) = nvn_lookup("nvnSyncCreateGLSync");
+    void *out = &foreign;
+    assert(!export_fence(NULL, &out) && !out);
+    NVNsync nvn;
+    NVNboolean (*init_sync)(NVNsync *, NVNdevice *) = nvn_lookup("nvnSyncInitialize");
+    assert(init_sync(&nvn, NULL));
+    assert(!export_fence(&nvn, &out) && !out);  // never fenced
+    void (*fence_sync)(NVNqueue *, NVNsync *, NVNsyncCondition, int) = nvn_lookup("nvnQueueFenceSync");
+    fence_sync(NULL, &nvn, 0, 0);  // no submissions yet: value zero is complete
+    assert(export_fence(&nvn, &out) && out);
+    void (*finish_sync)(NVNsync *) = nvn_lookup("nvnSyncFinalize");
+    finish_sync(&nvn);
+    int from_nvn;
+    assert(gl_sync_info(out, &serial, &from_nvn) && from_nvn && !serial);
+    assert(h_glClientWaitSync(out, 0, 0) == GL_ALREADY_SIGNALED);
+    h_glWaitSync(out, 0, UINT64_MAX);
+    h_glDeleteSync(out); assert(!h_glGetError());
     const char *missing = "glMissingFunctionForTest";
     assert(!hle_implements(missing));
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);

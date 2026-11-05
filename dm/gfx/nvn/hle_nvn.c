@@ -721,6 +721,16 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 // ---------- Sync / events ----------
 NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
+extern void *gl_host_export_nvn_fence(uint64_t serial) __attribute__((weak_import));
+// The guest passes the NVN sync and a pointer to an output GLsync, which it then passes to glWaitSync.
+NVN_NOPROTO(nvnSyncCreateGLSync, NVNboolean, const NVNsync *s, void **out) {
+    if (!out) return 0;
+    *out = NULL;
+    const sync_t *o = (const sync_t *)s;
+    if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C') || !o->fenced || !gl_host_export_nvn_fence) return 0;
+    *out = gl_host_export_nvn_fence(o->fence);
+    return *out != NULL;
+}
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); }

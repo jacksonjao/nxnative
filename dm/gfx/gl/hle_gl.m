@@ -1349,29 +1349,35 @@ GL(glFlushMappedBufferRange, void, GLenum target, GLintptr off, GLsizeiptr len) 
 typedef struct gl_sync {
     uintptr_t handle;
     uint64_t serial;
+    int from_nvn;
     struct gl_sync *next;
 } sync_t;
 static pthread_mutex_t g_sync_mu = PTHREAD_MUTEX_INITIALIZER;
 static sync_t *g_syncs;
 static uintptr_t g_sync_next = 1;
-static int gl_sync_serial(void *handle, uint64_t *serial) {
+static int gl_sync_info(void *handle, uint64_t *serial, int *from_nvn) {
     int found = 0;
     pthread_mutex_lock(&g_sync_mu);
     for (sync_t *s = g_syncs; s; s = s->next) {
-        if (s->handle == (uintptr_t)handle) { *serial = s->serial; found = 1; break; }
+        if (s->handle == (uintptr_t)handle) { *serial = s->serial; if (from_nvn) *from_nvn = s->from_nvn; found = 1; break; }
     }
     pthread_mutex_unlock(&g_sync_mu);
     if (!found && !g_gl_error) g_gl_error = 0x501;  // GL_INVALID_VALUE
     return found;
 }
-GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
-    (void)cond; (void)flags;
+static void *gl_sync_make(uint64_t serial, int from_nvn) {
     sync_t *s = zalloc(sizeof *s);
     pthread_mutex_lock(&g_sync_mu);
     uintptr_t handle = g_sync_next++;
-    s->handle = handle; s->serial = g_serial; s->next = g_syncs; g_syncs = s;
+    s->handle = handle; s->serial = serial; s->from_nvn = from_nvn; s->next = g_syncs; g_syncs = s;
     pthread_mutex_unlock(&g_sync_mu);
     return (void *)handle;
+}
+// An exported NVN fence owns a new GL handle; finalizing either object does not invalidate the other.
+void *gl_host_export_nvn_fence(uint64_t serial) { return gl_sync_make(serial, 1); }
+GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
+    (void)cond; (void)flags;
+    return gl_sync_make(g_serial, 0);
 }
 GL(glDeleteSync, void, void *handle) {
     if (!handle) return;
@@ -1384,13 +1390,25 @@ GL(glDeleteSync, void, void *handle) {
     if (s) free(s);
     else if (!g_gl_error) g_gl_error = 0x501;  // GL_INVALID_VALUE
 }
-GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) {
+void *mtl_sync_event(void);
+GLB(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) {
     (void)flags; (void)timeout;
-    uint64_t serial; (void)gl_sync_serial(s, &serial);  // GL command buffers already execute in order
+    uint64_t serial; int from_nvn;
+    if (!gl_sync_info(s, &serial, &from_nvn) || !from_nvn || !serial) return;
+    // GL fences are already ordered on this queue. An NVN fence signals a different queue's event.
+    id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)mtl_sync_event();
+    if (!event || event.signaledValue >= serial) return;
+    if (g_pend_clear.bits) clears_flush();
+    pass_end();
+    [cb_get() encodeWaitForEvent:event value:serial];
 }
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
-    uint64_t serial;
-    if (!gl_sync_serial(sy, &serial)) return 0x911d;  // GL_WAIT_FAILED
+    uint64_t serial; int from_nvn;
+    if (!gl_sync_info(sy, &serial, &from_nvn)) return 0x911d;  // GL_WAIT_FAILED
+    if (from_nvn) {
+        if (mtl_wait(serial, 0)) return GL_ALREADY_SIGNALED;
+        return timeout_ns && mtl_wait(serial, timeout_ns) ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
+    }
     if (g_ev.signaledValue >= serial) return GL_ALREADY_SIGNALED;
     if (serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
         if (!timeout_ns && !(flags & GL_SYNC_FLUSH_COMMANDS_BIT)) return GL_TIMEOUT_EXPIRED;

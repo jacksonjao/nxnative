@@ -1739,6 +1739,7 @@ uint64_t mtl_sub_commit(void) {
 }
 
 uint64_t mtl_last_fence(void) { return g_fence; }
+void *mtl_sync_event(void) { return (__bridge void *)g_ev; }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
 static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FAST_WAKE"); v = !(e && !strcmp(e, "0")); MLOG("game SyncWaits wake on the GPU's signal of the fence%s (DM_NVN_FAST_WAKE)", v ? "" : ": off, on the feedback handler"); } return v; }
