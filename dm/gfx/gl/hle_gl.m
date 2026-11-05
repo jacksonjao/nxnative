@@ -1195,7 +1195,8 @@ GL(glColorTable, void, GLenum target, GLenum ifmt, GLsizei w, GLenum format, GLe
     RED1("paletted texture (glColorTable, %d entries): palette lookup at upload, the index shift is %d", w, S.index_shift);
 }
 GL(glTexEnvi, void, GLenum t, GLenum p, GLint v) { (void)t; (void)p; (void)v; }
-GL(glGetError, GLenum, void) { return 0; }
+static _Thread_local GLenum g_gl_error;
+GL(glGetError, GLenum, void) { GLenum error = g_gl_error; g_gl_error = 0; return error; }
 // Everything recorded so far runs to its end (LÖVE when the window changes)
 // glFlush: hand the commands encoded so far to the GPU without waiting. The layer commits at the frame's end, so a game that flushes in the middle of a frame
 // (GameMaker's runner does, before a menu or a surface read) would otherwise see nothing but the pointer: eglGetProcAddress returned null for a name it only
@@ -1343,21 +1344,61 @@ GL(glFlushMappedBufferRange, void, GLenum target, GLintptr off, GLsizeiptr len) 
 // ---------- Sync objects ----------
 // A fence is the serial of the command buffer being recorded when it was made, signalled when that command buffer completes (g_ev). LÖVE fences each third of its stream
 // buffers at the end of a frame and waits for the fence three frames later, before it writes that third again
-typedef struct { uint64_t serial; } sync_t;
-GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial; return s; }
-GL(glDeleteSync, void, void *s) { free(s); }
-GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
+// GLsync is an opaque handle. A foreign or stale handle must never reach
+// free or be dereferenced, including when NVN/GL interoperability is absent.
+typedef struct gl_sync {
+    uintptr_t handle;
+    uint64_t serial;
+    struct gl_sync *next;
+} sync_t;
+static pthread_mutex_t g_sync_mu = PTHREAD_MUTEX_INITIALIZER;
+static sync_t *g_syncs;
+static uintptr_t g_sync_next = 1;
+static int gl_sync_serial(void *handle, uint64_t *serial) {
+    int found = 0;
+    pthread_mutex_lock(&g_sync_mu);
+    for (sync_t *s = g_syncs; s; s = s->next) {
+        if (s->handle == (uintptr_t)handle) { *serial = s->serial; found = 1; break; }
+    }
+    pthread_mutex_unlock(&g_sync_mu);
+    if (!found && !g_gl_error) g_gl_error = 0x501;  // GL_INVALID_VALUE
+    return found;
+}
+GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
+    (void)cond; (void)flags;
+    sync_t *s = zalloc(sizeof *s);
+    pthread_mutex_lock(&g_sync_mu);
+    uintptr_t handle = g_sync_next++;
+    s->handle = handle; s->serial = g_serial; s->next = g_syncs; g_syncs = s;
+    pthread_mutex_unlock(&g_sync_mu);
+    return (void *)handle;
+}
+GL(glDeleteSync, void, void *handle) {
+    if (!handle) return;
+    pthread_mutex_lock(&g_sync_mu);
+    sync_t **link = &g_syncs;
+    while (*link && (*link)->handle != (uintptr_t)handle) link = &(*link)->next;
+    sync_t *s = *link;
+    if (s) *link = s->next;
+    pthread_mutex_unlock(&g_sync_mu);
+    if (s) free(s);
+    else if (!g_gl_error) g_gl_error = 0x501;  // GL_INVALID_VALUE
+}
+GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) {
+    (void)flags; (void)timeout;
+    uint64_t serial; (void)gl_sync_serial(s, &serial);  // GL command buffers already execute in order
+}
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
-    sync_t *s = sy;
-    if (!s) return 0x911d;   // WAIT_FAILED
-    if (g_ev.signaledValue >= s->serial) return GL_ALREADY_SIGNALED;
-    if (s->serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
+    uint64_t serial;
+    if (!gl_sync_serial(sy, &serial)) return 0x911d;  // GL_WAIT_FAILED
+    if (g_ev.signaledValue >= serial) return GL_ALREADY_SIGNALED;
+    if (serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
         if (!timeout_ns && !(flags & GL_SYNC_FLUSH_COMMANDS_BIT)) return GL_TIMEOUT_EXPIRED;
         dm_gfx_enter(); cb_commit(); dm_gfx_leave();
     }
     if (!timeout_ns) return GL_TIMEOUT_EXPIRED;
     uint64_t ms = timeout_ns / 1000000;
-    return [g_ev waitUntilSignaledValue:s->serial timeoutMS:ms ? ms : 1] ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
+    return [g_ev waitUntilSignaledValue:serial timeoutMS:ms ? ms : 1] ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
 }
 GL(glGenVertexArrays, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_vaos, &g_nvaos, &g_capvaos, sizeof(vao_t)); }
 GL(glDeleteVertexArrays, void, GLsizei n, const GLuint *v) { for (GLsizei i = 0; i < n; i++) if (v[i] && v[i] < g_nvaos && g_vaos[v[i]]) { free(g_vaos[v[i]]); g_vaos[v[i]] = NULL; if (S.vao == v[i]) S.vao = 0; } }

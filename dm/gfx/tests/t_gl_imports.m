@@ -87,6 +87,19 @@ int main(int argc, char **argv) {
     assert(h_eglMakeCurrent(d, NULL, NULL, NULL) && !h_eglGetCurrentDisplay());
     assert(h_eglMakeCurrent(d, draw, read, c) && h_eglReleaseThread());
     assert(!h_eglGetCurrentDisplay() && !h_eglGetCurrentContext() && !h_eglGetCurrentSurface(0x3059));
+    // A foreign pointer (e.g. a game-owned NVNsync) and a stale GL handle
+    // must be rejected without passing either to the host allocator.
+    uintptr_t foreign = 0;
+    h_glDeleteSync(&foreign); assert(h_glGetError() == 0x501);
+    h_glDeleteSync(NULL); assert(h_glGetError() == 0);
+    void *sync = h_glFenceSync(0x9117, 0);
+    uint64_t serial;
+    assert(gl_sync_serial(sync, &serial) && serial == g_serial);
+    h_glDeleteSync(sync); assert(h_glGetError() == 0);
+    void *next_sync = h_glFenceSync(0x9117, 0); assert(next_sync != sync);
+    assert(h_glClientWaitSync(sync, 0, 0) == 0x911d && h_glGetError() == 0x501);
+    h_glWaitSync(&foreign, 0, UINT64_MAX); assert(h_glGetError() == 0x501);
+    h_glDeleteSync(next_sync); assert(h_glGetError() == 0);
     const char *missing = "glMissingFunctionForTest";
     assert(!hle_implements(missing));
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
