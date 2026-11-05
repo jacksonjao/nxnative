@@ -3065,7 +3065,7 @@ static void fz_end(void);   // Wrap-up of the readable-tile pass merge (defined 
 static void defer_fallback(void);
 // DM_NVN_ENC_LABEL=1: label every render encoder with 'p<index of the render pass within the frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draw count>'; in Instruments (xctrace Game Performance / Metal System Trace)
 // the encoder track and the GPU interval table carry this name directly, and shader_map.tsv maps it back to the shader; off by default (one string allocation per pass)
-static int g_el_w, g_el_h, g_el_draws; static char g_el_key[12];
+static int g_el_w, g_el_h, g_el_draws; static char g_el_key[12], g_el_attachment[112];
 static int enc_label_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ENC_LABEL"); v = e ? atoi(e) : 1; } return v; }
 static void ghost_flush(void);
 static void za_atomic_sync_end(void);
@@ -3079,7 +3079,7 @@ static void pixel_history_draw(const char *vs, const char *fs);
 static void rp_end(void) { if (g_enc) { AP_B;
     ghost_flush();
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
-        [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
+        [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d%s", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws, g_el_draws ? "" : g_el_attachment]]; }
 #ifdef NVN_RT_RANGE_TEST
     int ranged=g_rt_range_active && !g_rt_range_pending;
 #endif
@@ -3458,7 +3458,20 @@ static id<MTLRenderCommandEncoder> rp_begin_ex_(int clear_only) {
     g_enc = enc_r_begin_pass(pd);
     args_dirty_all();
     g_stat_pass++;
-    if (enc_label_on()) { id<MTLTexture> lt = pd.colorAttachments[0].texture ?: pd.depthAttachment.texture ?: pd.stencilAttachment.texture; g_el_w = (int)lt.width; g_el_h = (int)lt.height; g_el_draws = 0; g_el_key[0] = 0; }
+    if (enc_label_on()) {
+        MTLRenderPassAttachmentDescriptor *a = pd.colorAttachments[0].texture ? pd.colorAttachments[0] :
+            pd.depthAttachment.texture ? pd.depthAttachment : pd.stencilAttachment;
+        id<MTLTexture> lt = a.texture;
+        g_el_w = (int)lt.width; g_el_h = (int)lt.height; g_el_draws = 0; g_el_key[0] = 0; g_el_attachment[0] = 0;
+        // Encode subresource evidence directly into a faulted empty encoder's
+        // label; pass logging changes the timing of intermittent GPU faults.
+        if (g_el_w == 128 && g_el_h == 128)
+            snprintf(g_el_attachment, sizeof g_el_attachment, " a%lu t%lu l%lu s%lu z%lu/%lu ld%lu st%lu m%d",
+                     (unsigned long)lt.pixelFormat, (unsigned long)lt.textureType,
+                     (unsigned long)a.level, (unsigned long)a.slice, (unsigned long)a.depthPlane,
+                     (unsigned long)MAX(lt.arrayLength, lt.depth), (unsigned long)a.loadAction,
+                     (unsigned long)a.storeAction, clear_only);
+    }
     return g_enc;
 }
 // Empty-scissor precheck before opening a pass: the size of the selected level of the first valid target is an upper bound on the minimum bounds of the actual pass.

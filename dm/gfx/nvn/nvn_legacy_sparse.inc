@@ -1,5 +1,5 @@
 // The Switch 2 terrain caches include unsigned BC6H (decoded on older
-// GPUs) and native RGBX16SN. A mapped guest 64 KiB page is copied into
+// GPUs) and native ASTC 8x8 sRGB. A mapped guest 64 KiB page is copied into
 // private sparse Metal tiles; GPU-written data stays in those tiles until
 // the guest changes the backing mapping or writes the backing CPU pages.
 enum { LS_PAGE = 65536, LS_BATCH = 8 << 20, LS_HEAP = 384 << 20, LS_DETAIL = 160 << 20 };
@@ -27,7 +27,7 @@ void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n);
 
 typedef struct {
     MTLRegion pixels;
-    NSUInteger level, slice, offset, row;
+    NSUInteger level, slice, offset, row, image_bytes;
     int mapping; // +1 map, -1 unmap, 0 leave unchanged
 } ls_op;
 
@@ -40,7 +40,7 @@ typedef struct {
 
 static int legacy_sparse_candidate(const tex_t *t) {
     return t && t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY &&
-        ((t->d.format == 0x50 && no_bc()) || t->d.format == NVN_FORMAT_RGBX16SN) &&
+        ((t->d.format == 0x50 && no_bc()) || t->d.format == NVN_FORMAT_RGBA_ASTC_8x8_SRGB) &&
         t->d.width == 8192 && t->d.height == 8192 && t->d.depth == 68 && t->d.levels == 12 &&
         (t->d.flags & NVN_TEXTURE_FLAGS_SPARSE) &&
         !(t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE |
@@ -79,7 +79,7 @@ static bool ls_flush(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacyS
             ls_op *op = &batch->ops[i];
             if (!op->row) continue;
             [blit copyFromBuffer:batch->data sourceOffset:op->offset sourceBytesPerRow:op->row
-              sourceBytesPerImage:op->row * op->pixels.size.height sourceSize:op->pixels.size
+              sourceBytesPerImage:op->image_bytes sourceSize:op->pixels.size
                          toTexture:mt destinationSlice:op->slice destinationLevel:op->level destinationOrigin:op->pixels.origin];
         }
         [blit endEncoding];
@@ -101,15 +101,17 @@ static bool ls_flush(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacyS
 static bool ls_stage(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacySparse *state, ls_op op,
                      const nvn_texdesc *src, unsigned src_level, const void *raw, void *blocks) {
     unsigned w = (unsigned)op.pixels.size.width, h = (unsigned)op.pixels.size.height;
-    size_t row = raw ? (w * 8u + 255u) & ~255u : 0;
-    size_t bytes = row * h;
+    bool native_astc = src->format == NVN_FORMAT_RGBA_ASTC_8x8_SRGB;
+    size_t width_bytes = native_astc ? ((w + 7) / 8) * 16 : w * 8u;
+    size_t row = raw ? (width_bytes + 255u) & ~255u : 0;
+    size_t bytes = row * (native_astc ? (h + 7) / 8 : h);
     if (batch->count == sizeof batch->ops / sizeof *batch->ops || batch->bytes + bytes > LS_BATCH)
         if (!ls_flush(batch, mt, tile, state)) return false;
     if (raw) {
         if (!batch->data) batch->data = [g_dev newBufferWithLength:LS_BATCH options:MTLResourceStorageModeShared];
         if (!batch->data) return false;
         uint8_t *dst = (uint8_t *)batch->data.contents + batch->bytes;
-        if (src->format == NVN_FORMAT_RGBX16SN) {
+        if (native_astc) {
             if (nvn_deswizzle(src, src_level, 0, raw, dst, row)) return false;
         } else {
             size_t block_row = ((w + 3) / 4) * 16;
@@ -119,6 +121,7 @@ static bool ls_stage(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacyS
     }
     op.offset = batch->bytes;
     op.row = row;
+    op.image_bytes = bytes;
     batch->ops[batch->count++] = op;
     batch->bytes += bytes;
     return true;
@@ -201,7 +204,7 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
                 int mode = (int)present - live[p];
                 if (!present && !mode) continue;
                 unsigned tiles = (unsigned)(tw / tile.width * (th / tile.height));
-                bool detail = l < 4;
+                bool detail = t->d.format == 0x50 && l < 4;
                 if (mode > 0 && !ls_fits(s, tiles, tile_bytes, detail)) { trimmed = true; continue; }
                 if (present) { nvn_sparse_protect(t->pool, a, LS_PAGE); if (nvn_sparse_copy(t->pool, raw, a, LS_PAGE)) continue; }
                 ls_op op = {.pixels = MTLRegionMake2D(x * tw, y * th, tw, th), .level = l, .slice = slice, .mapping = mode};
@@ -253,7 +256,7 @@ static id<MTLTexture> legacy_sparse_terrain(const tex_t *t, id<MTLTexture> exist
         s->heap = [g_dev newHeapWithDescriptor:heap];
         MTLTextureDescriptor *d = [MTLTextureDescriptor new];
         d.textureType = MTLTextureType2DArray;
-        d.pixelFormat = t->d.format == NVN_FORMAT_RGBX16SN ? MTLPixelFormatRGBA16Snorm : MTLPixelFormatRGBA16Float;
+        d.pixelFormat = t->d.format == NVN_FORMAT_RGBA_ASTC_8x8_SRGB ? MTLPixelFormatASTC_8x8_sRGB : MTLPixelFormatRGBA16Float;
         d.width = t->d.width; d.height = t->d.height;
         d.arrayLength = t->d.depth; d.mipmapLevelCount = t->d.levels;
         d.storageMode = MTLStorageModePrivate;
@@ -264,11 +267,6 @@ static id<MTLTexture> legacy_sparse_terrain(const tex_t *t, id<MTLTexture> exist
     }
     if (!s || atomic_load(&s->failed)) return nil;
     MTLSize tile = [g_dev sparseTileSizeWithTextureType:mt.textureType pixelFormat:mt.pixelFormat sampleCount:1];
-    if (fresh) {
-        res_add(mt);
-        tex_tag_format(mt, t->d.format);
-        tex_put(t->serial, mt);
-    }
     if (!ls_refresh(t, mt, s, tile)) {
         if (!atomic_exchange(&s->failed, true)) {
             g_ser_gen++;
@@ -278,7 +276,11 @@ static id<MTLTexture> legacy_sparse_terrain(const tex_t *t, id<MTLTexture> exist
         }
         return nil;
     }
-    if (fresh)
+    if (fresh) {
+        res_add(mt);
+        tex_tag_format(mt, t->d.format);
+        tex_put(t->serial, mt);
         MLOG("Legacy sparse terrain array format=%#x %ux%u x%u initialized (%u resident Metal tiles)", t->d.format, t->d.width, t->d.height, t->d.depth, s->resident);
+    }
     return mt;
 }
