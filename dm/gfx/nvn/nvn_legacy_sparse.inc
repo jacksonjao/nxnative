@@ -83,8 +83,10 @@ static bool ls_flush(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacyS
         [blit endEncoding];
     }
     [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
-        if (done.error && !atomic_exchange(&state->failed, true))
+        if (done.error && !atomic_exchange(&state->failed, true)) {
+            g_ser_gen++;
             MLOG("Legacy sparse BC6H command failed: %s", done.error.localizedDescription.UTF8String);
+        }
         dispatch_semaphore_signal(inflight);
     }];
     [cb commit];
@@ -130,7 +132,12 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
     int tail = nvn_tex_sparse_tiles(&t->d, &tw, &th, &td);
     unsigned mt_tail = (unsigned)mt.firstMipmapInTail;
     if (tail != 6 || tw != 256 || th != 256 || td != 1 || !tile.width || !tile.height ||
-        tw % tile.width || th % tile.height || mt_tail < (unsigned)tail || mt_tail >= mt.mipmapLevelCount) return false;
+        tw % tile.width || th % tile.height || mt_tail < (unsigned)tail) {
+        MLOG("Legacy sparse BC6H incompatible tile layout: guest %ux%ux%u tail=%d; Metal %lux%lux%lu tail=%u/%lu tile=%lu B",
+             tw, th, td, tail, (unsigned long)tile.width, (unsigned long)tile.height, (unsigned long)tile.depth,
+             mt_tail, (unsigned long)mt.mipmapLevelCount, (unsigned long)g_dev.sparseTileSizeInBytes);
+        return false;
+    }
     nvn_texdesc page = {.target = NVN_TEXTURE_TARGET_2D, .format = t->d.format,
                         .width = tw, .height = th, .depth = 1, .levels = 1};
     unsigned bh, bd;
@@ -139,7 +146,11 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
     nvn_texlayout pl;
     nvn_tex_layout(&page, &pl);
     size_t tail_off = nvn_tex_level_offset(&t->d, (unsigned)tail), layer = t->L.layer_size;
-    if (bd || pl.size != LS_PAGE || layer < tail_off || layer - tail_off != LS_PAGE) return false;
+    if (bd || pl.size != LS_PAGE || layer < tail_off || layer - tail_off != LS_PAGE) {
+        MLOG("Legacy sparse BC6H invalid guest pages: blockDepth=%u page=%zu layer=%zu tailOffset=%zu",
+             bd, (size_t)pl.size, layer, tail_off);
+        return false;
+    }
     if (!s->pages) s->pages = [NSMutableData dataWithLength:layer / LS_PAGE * t->d.depth];
     uint8_t *mapped = s->pages.mutableBytes;
     uint8_t *blocks = malloc(LS_PAGE);
@@ -220,15 +231,21 @@ static id<MTLTexture> legacy_sparse_bc6h(const tex_t *t, id<MTLTexture> existing
     }
     if (!s || atomic_load(&s->failed)) return nil;
     MTLSize tile = [g_dev sparseTileSizeWithTextureType:mt.textureType pixelFormat:mt.pixelFormat sampleCount:1];
-    if (!ls_refresh(t, mt, s, tile)) {
-        if (!atomic_exchange(&s->failed, true)) MLOG("Legacy sparse BC6H refresh stopped (layout, staging or residency limit)");
-        return nil;
-    }
     if (fresh) {
         res_add(mt);
         tex_tag_format(mt, t->d.format);
         tex_put(t->serial, mt);
-        MLOG("Legacy sparse BC6H array %ux%u x%u initialized (%u resident Metal tiles)", t->d.width, t->d.height, t->d.depth, s->resident);
     }
+    if (!ls_refresh(t, mt, s, tile)) {
+        if (!atomic_exchange(&s->failed, true)) {
+            g_ser_gen++;
+            MLOG("Legacy sparse BC6H refresh stopped: resident=%u tile=%lu B, Metal tile=%lux%lu tail=%lu; layer=%zu",
+                 s->resident, (unsigned long)g_dev.sparseTileSizeInBytes, (unsigned long)tile.width,
+                 (unsigned long)tile.height, (unsigned long)mt.firstMipmapInTail, (size_t)t->L.layer_size);
+        }
+        return nil;
+    }
+    if (fresh)
+        MLOG("Legacy sparse BC6H array %ux%u x%u initialized (%u resident Metal tiles)", t->d.width, t->d.height, t->d.depth, s->resident);
     return mt;
 }

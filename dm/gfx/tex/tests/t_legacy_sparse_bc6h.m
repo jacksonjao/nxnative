@@ -23,6 +23,7 @@ typedef struct {
 
 static id<MTLDevice> g_dev;
 static id<MTLCommandQueue> g_q;
+static _Atomic uint64_t g_ser_gen;
 static uint64_t generation, dirty;
 typedef struct {
     uint64_t at, gen, stamp;
