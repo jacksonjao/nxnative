@@ -43,15 +43,11 @@ def repair(mesh, pixel):
     mesh = replace(mesh, 'float _1185 = as_type<float>(_35[int(_1177)]);',
                    'float _1185 = as_type<float>(atomic_load_explicit('
                    '(threadgroup atomic_uint*)&_35[int(_1177)], memory_order_relaxed));', 1)
-    # The pixel body uses both XY components as interpolated texture
-    # coordinates. Primitive register 0 exports only Y; vertex 1 carries
-    # the two coordinates authored by this paired mesh program.
-    # Keep the shared pixel entry unchanged: it also pairs with meshes that
-    # already export the correct varying at location 0.
+    # The mesh and pixel entries are each reused in other combinations.
+    # Preserve the locations on both sides: a pair-specific varying remap
+    # must be selected in the runtime, not patched into these shared entries.
     if pixel.count('m_31 [[user(locn0)]];') != 1:
         raise ValueError('unexpected shared pixel interface')
-    mesh = replace(mesh, 'p0 [[user(locn0)]];', 'p0 [[user(locn2)]];', 1)
-    mesh = replace(mesh, 'a1 [[user(locn1)]];', 'a1 [[user(locn0)]];', 1)
     return mesh, pixel
 
 
