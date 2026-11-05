@@ -10,6 +10,10 @@
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
+#if defined(DM_LIBRARY_HOST) && !defined(DM_MULTI_GAME)
+#error "The game library must use the generated multi-game profile header."
+#endif
+
 #include "haptics_apple.h"
 #include "DmAudioRetry.h"
 #include "DmAudioBuffer.h"

@@ -23,6 +23,10 @@
 #include "dm_input.h"
 #include "front.h"
 #include "game_profile.h"
+#if defined(DM_LIBRARY_HOST) && !defined(DM_MULTI_GAME)
+#error "The game library must use the generated multi-game profile header."
+#endif
+
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_fusion.h"
@@ -178,6 +182,13 @@ static const CGFloat
     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+static NSString *dm_layout_preference_key(void) {
+#ifdef DM_LIBRARY_HOST
+    const char *title = getenv("DM_LIBRARY_GAME_ID");
+    if (title && *title) return [k_layout_key stringByAppendingFormat:@".%s", title];
+#endif
+    return k_layout_key;
+}
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 static BOOL pad_env_on(const char *name) {
@@ -282,7 +293,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS; }   // stick clicks
         if (g_aim_button) LOG("front end: tap Aim toggles ZL; hold either Command to aim; release/focus loss clears modifier input");
         if (_throwEnabled) LOG("front end: left Throw holds native ZR; right camera drag stays independent; release throws");
         LOG("front end: native A/B/X/Y unchanged; virtual face geometry alone can follow the original battle skill HUD");
-        NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
+        NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:dm_layout_preference_key()];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
         // A profile may require the complete controller surface. This also
         // upgrades an existing install whose saved preference predates newly
@@ -364,7 +375,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS; }   // stick clicks
     int l = pad_force_full() ? 1 : _tap ? 0 : _full ? (dm_opmode() == 0 ? 2 : 0) : 1;
     [self reset];
     _full = l == 1; _tap = l == 2;
-    [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:k_layout_key];
+    [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:dm_layout_preference_key()];
     [self applyLayout]; [self setNeedsLayout];
 }
 

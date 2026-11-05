@@ -3,6 +3,8 @@
 // Engine and Dawn are optional build inputs; no game code/assets live here.
 #import "TonTonGTAV.h"
 #include "gpu_host.h"
+#import <objc/message.h>
+#include <dlfcn.h>
 static NSString *gtavSlot, *gtavData, *gtavShaders, *gtavUser;
 static BOOL gtavActive;
 static BOOL gtavFindResources(NSString *slot, NSString **data, NSString **shaders) {
@@ -15,12 +17,38 @@ static BOOL gtavFindResources(NSString *slot, NSString **data, NSString **shader
        ![fm fileExistsAtPath:s isDirectory:&isDir] || !isDir)return NO;
     if(data)*data=d;if(shaders)*shaders=s;return YES;
 }
+static BOOL gtavLegacyActive;
+static NSString *gtavLegacyBinary(void) {
+    return [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"TonTonGTAEmbedded.framework/TonTonGTAEmbedded"];
+}
+static BOOL gtavLegacyAvailable(NSString *slot) {
+    if (!slot.length) return NO;
+    NSString *manifest=[slot stringByAppendingPathComponent:@"UserData/GTA V/data/manifest.json"];
+    NSFileManager *fm=NSFileManager.defaultManager;
+    return [fm isReadableFileAtPath:manifest] && [fm isReadableFileAtPath:gtavLegacyBinary()];
+}
+static UIViewController *gtavLegacyController(NSString *slot, void (^returnToLibrary)(void)) {
+    if (!gtavLegacyAvailable(slot)) return nil;
+    static void *runtime;
+    if (!runtime) runtime=dlopen(gtavLegacyBinary().fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+    if (!runtime) { NSLog(@"TonTon GTA V compatibility engine failed to load: %s", dlerror()); return nil; }
+    Class entry=NSClassFromString(@"TonTonGTAEmbeddedEntry");
+    SEL action=NSSelectorFromString(@"controllerForSlot:returnToLibrary:");
+    if (![entry respondsToSelector:action]) { NSLog(@"TonTon GTA V compatibility entry missing"); return nil; }
+    void (^back)(void)=^{
+        gtavLegacyActive=NO;
+        if(returnToLibrary) returnToLibrary();
+    };
+    UIViewController *controller=((UIViewController *(*)(id, SEL, NSString *, void (^)(void)))objc_msgSend)(entry,action,slot,back);
+    gtavLegacyActive=controller!=nil;
+    return controller;
+}
 BOOL TonTonGTAVAvailable(NSString *slot) {
     if (@available(iOS 17.0,*))return gtavFindResources(slot,NULL,NULL);
-    return NO;
+    return gtavLegacyAvailable(slot);
 }
-BOOL TonTonGTAVIsActive(void) { return gtavActive; }
-void TonTonGTAVFocus(int focus, int suspend) { host_input_focus(focus);gpu_suspend(suspend); }
+BOOL TonTonGTAVIsActive(void) { return gtavActive || gtavLegacyActive; }
+void TonTonGTAVFocus(int focus, int suspend) { if (gtavActive) { host_input_focus(focus);gpu_suspend(suspend); } }
 // The iPhone app: a Metal-backed game view, touch controls that feed the engine's keyboard-and-mouse input block, and startup.
 // The engine, renderer and audio are in libgta.a (host/).
 #import <AVFAudio/AVFAudio.h>
@@ -400,7 +428,15 @@ static double LookCurve(float v) {
 
 
 UIViewController *TonTonGTAVCreateController(NSString *slot) {
-    if(!TonTonGTAVAvailable(slot)||gtavActive)return nil;
+    return TonTonGTAVCreateControllerWithReturn(slot,nil);
+}
+UIViewController *TonTonGTAVCreateControllerWithReturn(NSString *slot, void (^returnToLibrary)(void)) {
+    if(!TonTonGTAVAvailable(slot)||gtavActive||gtavLegacyActive)return nil;
+    if (@available(iOS 17.0,*)) {
+        // Keep the normal launch path for newer devices.
+    } else {
+        return gtavLegacyController(slot,returnToLibrary);
+    }
     NSString *data=nil,*shaders=nil;
     if(!gtavFindResources(slot,&data,&shaders))return nil;
     gtavSlot=[slot copy];gtavData=data;gtavShaders=shaders;

@@ -1,6 +1,10 @@
 // Horizon kernel system calls (triggered by the SDK runtime once the SDK is loaded). Only what the P1 boot chain needs is implemented: memory layout + heap + query + debug output + timing.
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
+#if defined(DM_LIBRARY_HOST) && !defined(DM_MULTI_GAME)
+#error "The game library must use the generated multi-game profile header."
+#endif
+
 #include "map_headroom.h"
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE

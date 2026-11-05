@@ -336,7 +336,13 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 #ifdef DM_GTA_NATIVE
         if([titleID isEqual:@"gta5"]){
             NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
-            UIViewController *game=TonTonGTAVCreateController([documents stringByAppendingPathComponent:@"Games/gta5"]);
+            UIViewController *library=owner.window.rootViewController;
+            UIViewController *game=TonTonGTAVCreateControllerWithReturn([documents stringByAppendingPathComponent:@"Games/gta5"],^{
+                SceneDelegate *current=weakSelf;
+                if(!current)return;
+                g_boot_ok=0;
+                current.window.rootViewController=library;
+            });
             if(game){g_boot_ok=1;owner.window.rootViewController=game;}
             return;
         }

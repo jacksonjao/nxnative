@@ -1,0 +1,1697 @@
+diff --git a/app/App/AddGameGuideViewController.swift b/app/App/AddGameGuideViewController.swift
+index 7ca9ff6..2af953f 100644
+--- a/app/App/AddGameGuideViewController.swift
++++ b/app/App/AddGameGuideViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ #if !targetEnvironment(macCatalyst)
+diff --git a/app/App/Analytics.swift b/app/App/Analytics.swift
+index 2d048a7..f629845 100644
+--- a/app/App/Analytics.swift
++++ b/app/App/Analytics.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ import UIKit
+ 
+@@ -12,7 +13,7 @@ final class Analytics {
+     static let shared = Analytics()
+ 
+     private let queue = DispatchQueue(label: "analytics")
+-    private let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("stats-queue.json")
++    private let file = TTGTAContext.documents.appendingPathComponent("AppLibrary/Application Support", isDirectory: true).appendingPathComponent("stats-queue.json")
+     private var pending: [[String: Any]] = []
+     private var sending = false
+     private var timer: DispatchSourceTimer?
+@@ -20,7 +21,7 @@ final class Analytics {
+     let installID: String
+ 
+     private init() {
+-        let defaults = UserDefaults.standard
++        let defaults = TTGTAContext.defaults
+         if let saved = defaults.string(forKey: "statsInstallID") { installID = saved } else {
+             installID = UUID().uuidString.lowercased(); defaults.set(installID, forKey: "statsInstallID")
+         }
+@@ -62,8 +63,8 @@ final class Analytics {
+     private lazy var common: [String: Any] = {
+         let tier = GameSettings.shared.tier
+         var values: [String: Any] = [
+-            "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+-            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
++            "app_version": TTGTAContext.bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
++            "build": TTGTAContext.bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
+             "device": tier.model, "ios": UIDevice.current.systemVersion,
+             "memory_limit_mb": tier.memoryLimitMB, "physical_memory_gb": tier.physicalMemoryMB / 1024,
+             "language": AppLanguage.current.rawValue,
+diff --git a/app/App/AppDelegate.swift b/app/App/AppDelegate.swift
+index 2160637..8b0efe6 100644
+--- a/app/App/AppDelegate.swift
++++ b/app/App/AppDelegate.swift
+@@ -1,62 +1,5 @@
++import GTAEmbeddedABI
+ import UIKit
+-
+-/// Launch work that isn't about a window. The window comes from SceneDelegate: an app built with the iOS 27 SDK must
+-/// use the scene lifecycle or it stops at launch (GTA-171). Info.plist's UIApplicationSceneManifest names the scenes.
+-@main
+-final class AppDelegate: UIResponder, UIApplicationDelegate {
+-    func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+-        // The Lite build (PGLiteMode in Info.plist, build_ipa.sh --lite): the engine and renderer read PG_LITE.
+-        if Theme.isLite && getenv("PG_LITE") == nil { setenv("PG_LITE", "1", 1) }
+-        GameSettings.applyExperimentalSwitches()
+-        // Test (GTA-77): PG_TEST_COLD_SHADERS=1 deletes the system's compiled-shader cache for this app first (every
+-        // "com.apple.metal" folder in Library/Caches, two levels deep), so the launch compiles every pipeline again, as
+-        // the first launch after an update that changed the shaders does.
+-        if ProcessInfo.processInfo.environment["PG_TEST_COLD_SHADERS"] == "1",
+-           let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+-            var deleted: [String] = []
+-            let fm = FileManager.default
+-            for level1 in (try? fm.contentsOfDirectory(atPath: caches.path)) ?? [] {
+-                let path1 = caches.appendingPathComponent(level1)
+-                if level1 == "com.apple.metal" { try? fm.removeItem(at: path1); deleted.append(level1); continue }
+-                for level2 in (try? fm.contentsOfDirectory(atPath: path1.path)) ?? [] where level2 == "com.apple.metal" {
+-                    try? fm.removeItem(at: path1.appendingPathComponent(level2)); deleted.append(level1 + "/" + level2)
+-                }
+-            }
+-            let names = ((try? fm.contentsOfDirectory(atPath: caches.path)) ?? []).joined(separator: ", ")
+-            let mine = ((try? fm.contentsOfDirectory(atPath: caches.appendingPathComponent(Bundle.main.bundleIdentifier ?? "").path)) ?? []).joined(separator: ", ")
+-            setenv("PG_TEST_COLD_SHADERS_RESULT", (deleted.isEmpty ? "not found" : "deleted " + deleted.joined(separator: ", ")) + " (Library/Caches holds: \(names); its app folder holds: \(mine))", 1)   // the renderer logs it
+-        }
+-        ModInstaller.applyPending()
+-        ModKeyRemap.apply()  // keys that answer a mod's own key (GTA-181), before the mods load
+-        #if targetEnvironment(simulator)
+-        // Test: --import-save <file> runs Settings › Import a Story save on that file at launch.
+-        let arguments = ProcessInfo.processInfo.arguments
+-        if let i = arguments.firstIndex(of: "--import-save"), i + 1 < arguments.count {
+-            switch SaveImport.importSave(from: URL(fileURLWithPath: arguments[i + 1])) {
+-            case let .imported(title, slot): NSLog("[native-port] TEST: save imported: \(title) into slot \(slot)")
+-            case let .failed(message): NSLog("[native-port] TEST: save import failed: \(message)")
+-            }
+-        }
+-        #endif
+-        Analytics.shared.start()
+-        return true
+-    }
+-
+-    #if targetEnvironment(macCatalyst)
+-    /// The Mac menu bar: Settings… (⌘,) in the app menu, as every Mac app has it.
+-    override func buildMenu(with builder: UIMenuBuilder) {
+-        super.buildMenu(with: builder)
+-        guard builder.system == .main else { return }
+-        let settings = UIKeyCommand(title: AppLanguage.choose("Settings"), action: #selector(NativePortViewController.openSettingsFromMenu),
+-                                    input: ",", modifierFlags: .command)
+-        builder.insertSibling(UIMenu(options: .displayInline, children: [settings]), afterMenu: .about)
+-    }
+-    #endif
+-}
+-
+-/// The app's window: the phone's screen, or the Mac's window.
+-/// The game's window. It notes when a finger last touched the screen, for the Display log line (GTA-200): iOS raises a
+-/// ProMotion screen's refresh rate while it is touched, so touch and controller play can show different frame rates.
+ final class GameWindow: UIWindow {
+     static var lastTouch: CFTimeInterval = -1000
+     override func sendEvent(_ event: UIEvent) {
+@@ -65,64 +8,7 @@ final class GameWindow: UIWindow {
+     }
+ }
+ 
+-final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+-    var window: UIWindow?
+-    /// One game screen for the app's whole life. The engine starts once per launch, so a scene that connects again
+-    /// (a Mac window closed and opened again from the Dock, or iOS dropping the scene while the app was away) gets the
+-    /// same screen back instead of a second one.
+-    private static var gameScreen: NativePortViewController?
+-
+-    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+-        guard let scene = scene as? UIWindowScene else { return }
+-        let screen = Self.gameScreen ?? NativePortViewController()
+-        Self.gameScreen = screen
+-        if let old = screen.viewIfLoaded?.window { old.rootViewController = nil }
+-        let window = GameWindow(windowScene: scene)
+-        window.rootViewController = screen
+-        window.makeKeyAndVisible()
+-        self.window = window
+-        #if targetEnvironment(simulator)
+-        testWindowSizes(window, in: scene)
+-        #endif
+-    }
+-
+-    #if targetEnvironment(simulator)
+-    /// Tests (GTA-185): --test-window W1xH1[,W2xH2...] gives the window that size in points, centred, as the iPhone
+-    /// Duo's screens are (inner 951x669, outer 678x466) on a simulator big enough for it; with --test-fold-every S the
+-    /// window takes the next size every S seconds while the game runs, as folding and unfolding does.
+-    private var testSizes: [CGSize] = [], testSizeIndex = 0, testTimer: Timer?
+-    private func testWindowSizes(_ window: UIWindow, in scene: UIWindowScene) {
+-        let arguments = ProcessInfo.processInfo.arguments
+-        guard let i = arguments.firstIndex(of: "--test-window"), i + 1 < arguments.count else { return }
+-        testSizes = arguments[i + 1].split(separator: ",").compactMap { item in
+-            let parts = item.split(separator: "x").compactMap { Double($0) }
+-            return parts.count == 2 ? CGSize(width: parts[0], height: parts[1]) : nil
+-        }
+-        guard !testSizes.isEmpty else { return }
+-        placeTestWindow()
+-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.placeTestWindow() }   // once the scene is landscape
+-        if let j = arguments.firstIndex(of: "--test-fold-every"), j + 1 < arguments.count, let seconds = Double(arguments[j + 1]), testSizes.count > 1 {
+-            testTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: true) { [weak self] _ in
+-                guard let self else { return }
+-                self.testSizeIndex = (self.testSizeIndex + 1) % self.testSizes.count
+-                self.placeTestWindow()
+-                let size = self.testSizes[self.testSizeIndex]
+-                GameFolder.log("Test: the window is now \(Int(size.width))×\(Int(size.height)) points (a fold, GTA-185).")
+-            }
+-        }
+-    }
+-    private func placeTestWindow() {
+-        guard let window, let scene = window.windowScene else { return }
+-        let size = testSizes[testSizeIndex], screen = scene.coordinateSpace.bounds
+-        window.frame = CGRect(x: ((screen.width - size.width) / 2).rounded(), y: ((screen.height - size.height) / 2).rounded(), width: size.width, height: size.height)
+-    }
+-    #endif
+-}
+ 
+-/// A TV (AirPlay or an HDMI adapter) as iOS gives it to a scene-based app: a scene with the external display role.
+-/// NativePortViewController puts the game's picture on it during play (GTA-3); without a window from the app the TV
+-/// shows the phone's screen, as before Play. Info.plist names this delegate for that role; on iOS 27 the scene only
+-/// comes after the game screen registers it as a scene accessory (NativePortViewController.registerTVAccessory).
+ final class TVSceneDelegate: UIResponder, UIWindowSceneDelegate {
+     /// The scene configuration's name in Info.plist.
+     static let configurationName = "TV"
+diff --git a/app/App/AppLanguage.swift b/app/App/AppLanguage.swift
+index 1e30375..c8fa4cb 100644
+--- a/app/App/AppLanguage.swift
++++ b/app/App/AppLanguage.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Player-selectable languages for the app's own text: Rockstar's 13 official GTA V languages, which
+@@ -34,7 +35,7 @@ struct AppLanguage: Equatable {
+     /// The catalog's other languages, each named in its own language.
+     static let community: [AppLanguage] = {
+         let taken = Set(gameLanguages.map(\.catalogIdentifier) + ["Base"])
+-        return Bundle.main.localizations.filter { !taken.contains($0) }.map { code in
++        return TTGTAContext.bundle.localizations.filter { !taken.contains($0) }.map { code in
+             let locale = Locale(identifier: code)
+             let name = locale.localizedString(forIdentifier: code) ?? code
+             return AppLanguage(rawValue: code, name: name.prefix(1).uppercased(with: locale) + name.dropFirst(), catalogIdentifier: code)
+@@ -47,18 +48,18 @@ struct AppLanguage: Equatable {
+     private static let storageKey = "gtaPortAppLanguage"
+ 
+     static var current: AppLanguage {
+-        let saved = UserDefaults.standard.string(forKey: storageKey) ?? english.rawValue
++        let saved = TTGTAContext.defaults.string(forKey: storageKey) ?? english.rawValue
+         return allCases.first { $0.rawValue == saved } ?? .english
+     }
+ 
+     static func select(_ language: AppLanguage) {
+         guard current != language else { return }
+-        UserDefaults.standard.set(language.rawValue, forKey: storageKey)
++        TTGTAContext.defaults.set(language.rawValue, forKey: storageKey)
+         NotificationCenter.default.post(name: changed, object: nil)
+     }
+ 
+     private static func bundle(for identifier: String) -> Bundle? {
+-        guard let url = Bundle.main.url(forResource: identifier, withExtension: "lproj") else { return nil }
++        guard let url = TTGTAContext.bundle.url(forResource: identifier, withExtension: "lproj") else { return nil }
+         return Bundle(url: url)
+     }
+ 
+diff --git a/app/App/AssetPreloader.swift b/app/App/AssetPreloader.swift
+index 4f7e7c9..d6b9f3d 100644
+--- a/app/App/AssetPreloader.swift
++++ b/app/App/AssetPreloader.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ extension Notification.Name {
+@@ -7,11 +8,11 @@ extension Notification.Name {
+ /// Where the engine keeps its files. The asset cache sits next to this folder
+ /// (`AssetCache-<version>`), so the preloader and the engine must agree on it.
+ enum EnginePaths {
+-    static var manifest: String? { Bundle.main.path(forResource: "manifest", ofType: "json") }
++    static var manifest: String? { TTGTAContext.bundle.path(forResource: "manifest", ofType: "json") }
+ 
+     /// Returns the engine files root and, on the simulator, an optional note.
+     static func filesRoot() -> (path: String, note: String?) {
+-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("EngineFiles").path
++        let documents = TTGTAContext.documents.appendingPathComponent("EngineFiles").path
+         #if targetEnvironment(simulator)
+         // PG_SIMULATOR_ENGINE_ROOT (or PG_ENGINE_FILES_ROOT) keeps a test run's saves and cache apart.
+         let environment = ProcessInfo.processInfo.environment
+@@ -47,7 +48,7 @@ final class AssetPreloader {
+     /// Space left free on top of the download, for saves, shaders and iOS.
+     static let reserveBytes: UInt64 = 1_000_000_000
+ 
+-    private let defaults = UserDefaults.standard
++    private let defaults = TTGTAContext.defaults
+     private let arguments = ProcessInfo.processInfo.arguments
+     /// Debug subset: comma-separated path prefixes (e.g. `common/,x64/data/`).
+     let filter: String?
+diff --git a/app/App/ControllerPadView.swift b/app/App/ControllerPadView.swift
+index 52032ad..b62ec5f 100644
+--- a/app/App/ControllerPadView.swift
++++ b/app/App/ControllerPadView.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// What the layout editor (ControlsLayoutEditorController) needs from a set of on-screen controls: the situational
+diff --git a/app/App/ControlsLayout.swift b/app/App/ControlsLayout.swift
+index 707e6c2..08412a1 100644
+--- a/app/App/ControlsLayout.swift
++++ b/app/App/ControlsLayout.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// The player's own touch-control layout. Each moved control is stored by group ("foot" or
+@@ -13,14 +14,14 @@ struct ControlsLayout {
+ 
+     static var entries: [String: Entry] {
+         get {
+-            guard let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: [Double]] else { return [:] }
++            guard let raw = TTGTAContext.defaults.dictionary(forKey: key) as? [String: [Double]] else { return [:] }
+             return raw.compactMapValues { v in
+                 v.count >= 4 ? Entry(x: CGFloat(v[0]), y: CGFloat(v[1]), scale: CGFloat(v[2]), hidden: v[3] != 0) : nil
+             }
+         }
+         set {
+             let raw = newValue.mapValues { [Double($0.x), Double($0.y), Double($0.scale), $0.hidden ? 1 : 0] }
+-            UserDefaults.standard.set(raw, forKey: key)
++            TTGTAContext.defaults.set(raw, forKey: key)
+         }
+     }
+     static func entry(group: String, name: String) -> Entry? { entries["\(group).\(name)"] }
+@@ -71,7 +72,7 @@ final class ControlsLayoutEditorController: UIViewController {
+         background.contentMode = .scaleAspectFill
+         background.clipsToBounds = true
+         background.alpha = 0.55
+-        background.image = UIImage(named: "LaunchBackground")
++        background.image = UIImage(named: "LaunchBackground", in: TTGTAContext.bundle, compatibleWith: nil)
+         background.translatesAutoresizingMaskIntoConstraints = false
+         view.addSubview(background)
+         controls.translatesAutoresizingMaskIntoConstraints = false
+diff --git a/app/App/DebugChannel.swift b/app/App/DebugChannel.swift
+index 0ee216b..85028b6 100644
+--- a/app/App/DebugChannel.swift
++++ b/app/App/DebugChannel.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ #if targetEnvironment(simulator) || targetEnvironment(macCatalyst)
+ import Network
+ import UIKit
+diff --git a/app/App/DownloadBrowserViewController.swift b/app/App/DownloadBrowserViewController.swift
+index cfadff1..f7c0146 100644
+--- a/app/App/DownloadBrowserViewController.swift
++++ b/app/App/DownloadBrowserViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ import WebKit
+ 
+diff --git a/app/App/GameFiles.swift b/app/App/GameFiles.swift
+index eafb506..890d815 100644
+--- a/app/App/GameFiles.swift
++++ b/app/App/GameFiles.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Finding the game's files anywhere the app can see, and checking them against the game's file list.
+diff --git a/app/App/GameFilesViewController.swift b/app/App/GameFilesViewController.swift
+index ce5be57..580b310 100644
+--- a/app/App/GameFilesViewController.swift
++++ b/app/App/GameFilesViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ import UniformTypeIdentifiers
+ 
+@@ -219,10 +220,10 @@ final class GameFilesViewController: UIViewController, UIDocumentPickerDelegate,
+     /// The guide opens by itself the first time this screen has nothing at all to show (no game, archive or server).
+     private func showGuideOnce() {
+         let key = "addGameGuideShown"
+-        guard !UserDefaults.standard.bool(forKey: key), !ProcessInfo.processInfo.arguments.contains("--no-add-game-guide") else { return }
++        guard !TTGTAContext.defaults.bool(forKey: key), !ProcessInfo.processInfo.arguments.contains("--no-add-game-guide") else { return }
+         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+             guard let self, self.view.window != nil, self.presentedViewController == nil, !self.install.isRunning else { return }
+-            UserDefaults.standard.set(true, forKey: key)
++            TTGTAContext.defaults.set(true, forKey: key)
+             GameFolder.log("Game files: no game yet, showing the add-the-game guide")
+             self.showGuide(startAt: 0)
+         }
+diff --git a/app/App/GameFolder.swift b/app/App/GameFolder.swift
+index 60270d2..c7bce67 100644
+--- a/app/App/GameFolder.swift
++++ b/app/App/GameFolder.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Where your own copy of the game lives on this iPhone. Two ways:
+@@ -37,18 +38,18 @@ enum GameFolder {
+         return false
+         #else
+         let executable = (CommandLine.arguments.first ?? "").lowercased()
+-        return executable.contains("livecontainer") || !Bundle.main.bundlePath.lowercased().contains("/containers/bundle/application/")
++        return executable.contains("livecontainer") || !TTGTAContext.bundle.bundlePath.lowercased().contains("/containers/bundle/application/")
+         #endif
+     }()
+ 
+-    static var isChosen: Bool { inAppFolder || UserDefaults.standard.data(forKey: bookmarkKey) != nil }
+-    static var inAppFolder: Bool { UserDefaults.standard.bool(forKey: inAppKey) }
+-    static var name: String { UserDefaults.standard.string(forKey: nameKey) ?? "folder" }
+-    static var appFolder: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
++    static var isChosen: Bool { inAppFolder || TTGTAContext.defaults.data(forKey: bookmarkKey) != nil }
++    static var inAppFolder: Bool { TTGTAContext.defaults.bool(forKey: inAppKey) }
++    static var name: String { TTGTAContext.defaults.string(forKey: nameKey) ?? "folder" }
++    static var appFolder: URL { TTGTAContext.documents }
+ 
+     static func clear() {
+         testMapKnown = nil
+-        for key in [bookmarkKey, nameKey, subpathKey, inAppKey] { UserDefaults.standard.removeObject(forKey: key) }
++        for key in [bookmarkKey, nameKey, subpathKey, inAppKey] { TTGTAContext.defaults.removeObject(forKey: key) }
+     }
+ 
+     // MARK: The app's own folder
+@@ -78,14 +79,14 @@ enum GameFolder {
+             return false
+         }
+         acceptedProblemCount = best.problems.count
+-        if !inAppFolder || UserDefaults.standard.string(forKey: subpathKey) != subpath {
++        if !inAppFolder || TTGTAContext.defaults.string(forKey: subpathKey) != subpath {
+             log("Game folder found in the app's folder: \(subpath) (\(best.isComplete ? "all \(best.fileCount) files checked" : "\(best.problems.count) problem files, played anyway"))")
+         }
+-        UserDefaults.standard.removeObject(forKey: bookmarkKey)
+-        UserDefaults.standard.set(true, forKey: inAppKey)
++        TTGTAContext.defaults.removeObject(forKey: bookmarkKey)
++        TTGTAContext.defaults.set(true, forKey: inAppKey)
+         testMapKnown = nil
+-        UserDefaults.standard.set(subpath, forKey: subpathKey)
+-        UserDefaults.standard.set(displayName(best.data), forKey: nameKey)
++        TTGTAContext.defaults.set(subpath, forKey: subpathKey)
++        TTGTAContext.defaults.set(displayName(best.data), forKey: nameKey)
+         return true
+     }
+ 
+@@ -133,11 +134,11 @@ enum GameFolder {
+         }
+         do {
+             let bookmark = try picked.bookmarkData(options: bookmarkCreation, includingResourceValuesForKeys: nil, relativeTo: nil)
+-            UserDefaults.standard.set(bookmark, forKey: bookmarkKey)
+-            UserDefaults.standard.set(false, forKey: inAppKey)
++            TTGTAContext.defaults.set(bookmark, forKey: bookmarkKey)
++            TTGTAContext.defaults.set(false, forKey: inAppKey)
+             testMapKnown = nil
+-            UserDefaults.standard.set(subpath, forKey: subpathKey)
+-            UserDefaults.standard.set(displayName(best.data), forKey: nameKey)
++            TTGTAContext.defaults.set(subpath, forKey: subpathKey)
++            TTGTAContext.defaults.set(displayName(best.data), forKey: nameKey)
+             acceptedProblemCount = best.problems.count
+             log("Game folder accepted: data at \(subpath.isEmpty ? "(the picked folder)" : subpath), all \(best.fileCount) files checked")
+             return .accepted(best)
+@@ -154,7 +155,7 @@ enum GameFolder {
+         !report.isComplete && report.inICloud.isEmpty && report.problems.count <= 20
+     }
+     private static func accepted(_ report: GameFiles.Report, subpath: String) -> Bool {
+-        guard let saved = UserDefaults.standard.string(forKey: acceptedKey) else { return false }
++        guard let saved = TTGTAContext.defaults.string(forKey: acceptedKey) else { return false }
+         let parts = saved.split(separator: "\u{1}", maxSplits: 1).map(String.init)
+         return parts.count == 2 && parts[1] == subpath && report.problems.count <= Int(parts[0]) ?? 0 && playAnywayAllowed(report)
+     }
+@@ -164,30 +165,30 @@ enum GameFolder {
+         guard playAnywayAllowed(report) else { return false }
+         if let pick = pendingPick, pick.report.data == report.data {
+             let subpath = relative(report.data, to: pick.url)
+-            UserDefaults.standard.set("\(report.problems.count)\u{1}\(subpath)", forKey: acceptedKey)
++            TTGTAContext.defaults.set("\(report.problems.count)\u{1}\(subpath)", forKey: acceptedKey)
+             if case .accepted = choose(pick.url) { pendingPick = nil; return true }
+             return false
+         }
+         let subpath = relative(report.data, to: appFolder)
+-        UserDefaults.standard.set("\(report.problems.count)\u{1}\(subpath)", forKey: acceptedKey)
++        TTGTAContext.defaults.set("\(report.problems.count)\u{1}\(subpath)", forKey: acceptedKey)
+         log("Playing anyway with \(report.problems.count) problem files in \(subpath)")
+         return findInAppFolder()
+     }
+ 
+     /// The chosen game's data/ folder, with access granted for the rest of this launch.
+     static func open() -> URL? {
+-        let subpath = UserDefaults.standard.string(forKey: subpathKey) ?? ""
++        let subpath = TTGTAContext.defaults.string(forKey: subpathKey) ?? ""
+         if inAppFolder {
+             let data = subpath.isEmpty ? appFolder : appFolder.appendingPathComponent(subpath)
+             return GameFiles.gameData(at: data) == data ? data : nil
+         }
+-        guard let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
++        guard let bookmark = TTGTAContext.defaults.data(forKey: bookmarkKey) else { return nil }
+         var stale = false
+         guard let root = try? URL(resolvingBookmarkData: bookmark, options: bookmarkResolution, relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+         if root.startAccessingSecurityScopedResource() { accessing = root }
+         guard FileManager.default.isReadableFile(atPath: root.path) else { return nil }
+         if stale, let fresh = try? root.bookmarkData(options: bookmarkCreation, includingResourceValuesForKeys: nil, relativeTo: nil) {
+-            UserDefaults.standard.set(fresh, forKey: bookmarkKey)
++            TTGTAContext.defaults.set(fresh, forKey: bookmarkKey)
+         }
+         // Folders remembered by older versions have no subpath: look again.
+         let data = subpath.isEmpty ? (GameFiles.scan(root, depth: 4).best?.data ?? root) : root.appendingPathComponent(subpath)
+diff --git a/app/App/GameInstall.swift b/app/App/GameInstall.swift
+index 46df0a8..020a693 100644
+--- a/app/App/GameInstall.swift
++++ b/app/App/GameInstall.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Where an install of the game files comes from.
+diff --git a/app/App/GameInstaller/GameInstaller.swift b/app/App/GameInstaller/GameInstaller.swift
+index e25599f..622df4f 100644
+--- a/app/App/GameInstaller/GameInstaller.swift
++++ b/app/App/GameInstaller/GameInstaller.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Downloads (or reads) an archive of the game and unpacks only the game's files into
+@@ -7,7 +8,7 @@ import Foundation
+ /// let task = GameInstaller.install(
+ ///     from: .url(URL(string: "https://example.com/GTA.zip")!),
+ ///     to: documentsFolder,
+-///     manifest: Bundle.main.url(forResource: "manifest", withExtension: "json")!,
++///     manifest: TTGTAContext.bundle.url(forResource: "manifest", withExtension: "json")!,
+ ///     progress: { p in label.text = "\(p.extractedBytes) of \(p.totalBytes)" },
+ ///     completion: { result in ... })
+ /// // task.cancel()
+diff --git a/app/App/GameInstaller/GameManifest.swift b/app/App/GameInstaller/GameManifest.swift
+index 53afd2d..6984454 100644
+--- a/app/App/GameInstaller/GameManifest.swift
++++ b/app/App/GameInstaller/GameManifest.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// The game's file list: `{"files": [[path under data/, size, ...], ...]}`.
+diff --git a/app/App/GameInstaller/InstallJob.swift b/app/App/GameInstaller/InstallJob.swift
+index c1dc333..690738c 100644
+--- a/app/App/GameInstaller/InstallJob.swift
++++ b/app/App/GameInstaller/InstallJob.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Box handed to the C read callback. Keeps the last two blocks it handed out (the sources keep
+diff --git a/app/App/GameInstaller/LocalSource.swift b/app/App/GameInstaller/LocalSource.swift
+index 8d1466a..56e4c7b 100644
+--- a/app/App/GameInstaller/LocalSource.swift
++++ b/app/App/GameInstaller/LocalSource.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Feeds archive bytes to libarchive, one block at a time, strictly front to back.
+diff --git a/app/App/GameInstaller/RemoteSource.swift b/app/App/GameInstaller/RemoteSource.swift
+index 32c37c9..1a1c63e 100644
+--- a/app/App/GameInstaller/RemoteSource.swift
++++ b/app/App/GameInstaller/RemoteSource.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// What identifies the remote archive across runs: sizes and HTTP validators per part.
+diff --git a/app/App/GameInstaller/ResumeRecord.swift b/app/App/GameInstaller/ResumeRecord.swift
+index 272148c..9135e9f 100644
+--- a/app/App/GameInstaller/ResumeRecord.swift
++++ b/app/App/GameInstaller/ResumeRecord.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// What an interrupted install left behind, as the app sees it (for a "Continue download (37%)" button).
+diff --git a/app/App/GameSettings.swift b/app/App/GameSettings.swift
+index 801a1bc..c2f443c 100644
+--- a/app/App/GameSettings.swift
++++ b/app/App/GameSettings.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// How the engine starts: the same two choices as the web build's loading
+@@ -18,7 +19,7 @@ enum GameMode: Int, CaseIterable {
+ /// Player preferences, kept in UserDefaults across launches.
+ final class GameSettings {
+     static let shared = GameSettings()
+-    private let defaults = UserDefaults.standard
++    private let defaults = TTGTAContext.defaults
+ 
+     var gyroAim: GyroAimMode {
+         get { GyroAimMode(rawValue: defaults.integer(forKey: "gyroAim")) ?? .off }
+@@ -48,7 +49,7 @@ final class GameSettings {
+     var assetServer: String {
+         get {
+             if let saved = defaults.string(forKey: "assetServer"), !saved.isEmpty { return saved }
+-            return Bundle.main.object(forInfoDictionaryKey: "PGDefaultAssetServer") as? String ?? ""
++            return TTGTAContext.bundle.object(forInfoDictionaryKey: "PGDefaultAssetServer") as? String ?? ""
+         }
+         set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "assetServer") }
+     }
+diff --git a/app/App/GraphicsOptions.swift b/app/App/GraphicsOptions.swift
+index c1b9bcb..4ea09cd 100644
+--- a/app/App/GraphicsOptions.swift
++++ b/app/App/GraphicsOptions.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ import Metal
+ import UIKit
+diff --git a/app/App/GyroInput.swift b/app/App/GyroInput.swift
+index f214298..9ce641f 100644
+--- a/app/App/GyroInput.swift
++++ b/app/App/GyroInput.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import CoreMotion
+ import UIKit
+ 
+diff --git a/app/App/HUDLayoutEditor.swift b/app/App/HUDLayoutEditor.swift
+index 0e2d550..e50316b 100644
+--- a/app/App/HUDLayoutEditor.swift
++++ b/app/App/HUDLayoutEditor.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// Where the game draws its minimap for a place in its HUD units (GTA-131). The game keeps its HUD in a 16:9
+@@ -228,8 +229,8 @@ enum HUDGeometry {
+ extension GameSettings {
+     /// HUD layout (GTA-197): the pieces the player moved, by HUDPiece name: [dx, dy, scale] in HUD units.
+     private var hudLayoutStore: [String: [Double]] {
+-        get { UserDefaults.standard.dictionary(forKey: "hudLayout") as? [String: [Double]] ?? [:] }
+-        set { UserDefaults.standard.set(newValue, forKey: "hudLayout") }
++        get { TTGTAContext.defaults.dictionary(forKey: "hudLayout") as? [String: [Double]] ?? [:] }
++        set { TTGTAContext.defaults.set(newValue, forKey: "hudLayout") }
+     }
+     /// The place the player chose, or nil: the piece's own place for the buttons on screen.
+     func hudCustom(_ piece: HUDPiece) -> HUDOffset? {
+@@ -250,13 +251,13 @@ extension GameSettings {
+     /// which moves to the bottom left when the minimap is at the top.
+     var fpsPlace: CGPoint? {
+         get {
+-            guard let v = UserDefaults.standard.array(forKey: "fpsPlace") as? [Double], v.count == 2 else { return nil }
++            guard let v = TTGTAContext.defaults.array(forKey: "fpsPlace") as? [Double], v.count == 2 else { return nil }
+             return CGPoint(x: v[0], y: v[1])
+         }
+-        set { UserDefaults.standard.set(newValue.map { [Double($0.x), Double($0.y)] }, forKey: "fpsPlace") }
++        set { TTGTAContext.defaults.set(newValue.map { [Double($0.x), Double($0.y)] }, forKey: "fpsPlace") }
+     }
+     /// Back to the help messages' own place (which depends on the minimap's).
+-    func resetHelpTextPlace() { UserDefaults.standard.removeObject(forKey: "helpTextPlace") }
++    func resetHelpTextPlace() { TTGTAContext.defaults.removeObject(forKey: "helpTextPlace") }
+     /// Hands the engine the pieces it places (before the engine starts; the wheel and phone also during play).
+     func applyHUDLayout(_ context: HUDTouchContext = GameSettings.hudContext, screen: CGSize = UIScreen.main.bounds.size) {
+         // The phone's sideways units follow the screen's height: on a screen narrower than 16:9 (the HUD area is then the
+@@ -309,7 +310,7 @@ final class HUDLayoutEditorController: UIViewController {
+         let settings = GameSettings.shared
+         minimap = settings.minimapLayout
+         help = settings.helpTextLayout
+-        helpAtDefault = UserDefaults.standard.object(forKey: "helpTextPlace") == nil
++        helpAtDefault = TTGTAContext.defaults.object(forKey: "helpTextPlace") == nil
+         fps = settings.fpsPlace
+         self.lowMemory = HUDGeometry.fpsLowMemoryMark
+         selected = piece
+@@ -333,7 +334,7 @@ final class HUDLayoutEditorController: UIViewController {
+         background.contentMode = .scaleAspectFill
+         background.clipsToBounds = true
+         background.alpha = 0.55
+-        background.image = UIImage(named: "LaunchBackground")
++        background.image = UIImage(named: "LaunchBackground", in: TTGTAContext.bundle, compatibleWith: nil)
+         // The touch buttons, dimmed, so the pieces can be kept clear of them (they have their own editor).
+         controls.editing = true
+         controls.isUserInteractionEnabled = false
+diff --git a/app/App/HomeView.swift b/app/App/HomeView.swift
+index 9232174..420f8dc 100644
+--- a/app/App/HomeView.swift
++++ b/app/App/HomeView.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// The start screen: background art, the game's title, where the game files are, the mode choice,
+@@ -27,6 +28,7 @@ final class HomeView: UIView {
+     let preloadLabel = UILabel()
+     let controllerLabel = UILabel()
+     /// Taps on the game files card.
++    var onReturnToGameBox: (() -> Void)?
+     var onFiles: (() -> Void)?
+     /// A mode card was tapped (index into GameMode.allCases).
+     var onMode: ((Int) -> Void)?
+@@ -51,7 +53,7 @@ final class HomeView: UIView {
+         let backdrop = Theme.backdrop(image: "StartBackground")
+         pin(backdrop, to: self)
+ 
+-        let icon = UIImageView(image: UIImage(named: "HomeIcon"))
++        let icon = UIImageView(image: UIImage(named: "HomeIcon", in: TTGTAContext.bundle, compatibleWith: nil))
+         icon.layer.cornerRadius = 14
+         icon.layer.cornerCurve = .continuous
+         icon.clipsToBounds = true
+@@ -91,8 +93,9 @@ final class HomeView: UIView {
+         modeDetail.adjustsFontSizeToFitWidth = true
+         modeDetail.minimumScaleFactor = 0.8
+ 
+-        telegramButton.addAction(UIAction { _ in UIApplication.shared.open(Theme.telegramURL) }, for: .touchUpInside)
+-        telegramButton.accessibilityLabel = AppLanguage.choose("Five Star Port on Telegram")
++        telegramButton.addAction(UIAction { [weak self] _ in self?.onReturnToGameBox?() }, for: .touchUpInside)
++        telegramButton.accessibilityLabel = "返回游戏匣"
++        telegramButton.configuration?.image = UIImage(systemName: "chevron.backward")
+         let secondary = self.secondary
+         // Icons only, in every language; the names stay for VoiceOver.
+         settingsButton.accessibilityLabel = AppLanguage.choose("Settings")
+diff --git a/app/App/Info.plist b/app/App/Info.plist
+index 702dccd..73101c1 100644
+--- a/app/App/Info.plist
++++ b/app/App/Info.plist
+@@ -17,7 +17,7 @@
+ 	<key>CFBundleName</key>
+ 	<string>$(PRODUCT_NAME)</string>
+ 	<key>CFBundlePackageType</key>
+-	<string>APPL</string>
++	<string>FMWK</string>
+ 	<key>CFBundleShortVersionString</key>
+ 	<string>1.5.2</string>
+ 	<key>CFBundleVersion</key>
+@@ -48,32 +48,6 @@
+ 	<false/>
+ 	<key>PGProfileThreads</key>
+ 	<string>Headless mixer,RenderThread,gta.engine.main,Dependency,gta5port.metal,main (UI)</string>
+-	<key>UIApplicationSceneManifest</key>
+-	<dict>
+-		<key>UIApplicationSupportsMultipleScenes</key>
+-		<false/>
+-		<key>UISceneConfigurations</key>
+-		<dict>
+-			<key>UIWindowSceneSessionRoleApplication</key>
+-			<array>
+-				<dict>
+-					<key>UISceneConfigurationName</key>
+-					<string>Default</string>
+-					<key>UISceneDelegateClassName</key>
+-					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+-				</dict>
+-			</array>
+-			<key>UIWindowSceneSessionRoleExternalDisplayNonInteractive</key>
+-			<array>
+-				<dict>
+-					<key>UISceneConfigurationName</key>
+-					<string>TV</string>
+-					<key>UISceneDelegateClassName</key>
+-					<string>$(PRODUCT_MODULE_NAME).TVSceneDelegate</string>
+-				</dict>
+-			</array>
+-		</dict>
+-	</dict>
+ 	<key>UIFileSharingEnabled</key>
+ 	<true/>
+ 	<key>UILaunchScreen</key>
+diff --git a/app/App/KeyboardMouse.swift b/app/App/KeyboardMouse.swift
+index 0e10724..79ee2af 100644
+--- a/app/App/KeyboardMouse.swift
++++ b/app/App/KeyboardMouse.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import GameController
+ import UIKit
+ 
+diff --git a/app/App/LogUploader.swift b/app/App/LogUploader.swift
+index 9ec617d..88dbbfa 100644
+--- a/app/App/LogUploader.swift
++++ b/app/App/LogUploader.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ import UIKit
+ 
+@@ -26,7 +27,7 @@ enum LogUploader {
+             URLQueryItem(name: "from", value: "app"),
+             URLQueryItem(name: "device", value: GameSettings.shared.tier.model),
+             URLQueryItem(name: "os", value: "\(system) \(UIDevice.current.systemVersion)"),
+-            URLQueryItem(name: "v", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""),
++            URLQueryItem(name: "v", value: TTGTAContext.bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""),
+             URLQueryItem(name: "platform", value: platform),
+         ] + (logID.map { [URLQueryItem(name: "log", value: $0)] } ?? [])
+         return parts?.url
+@@ -96,7 +97,7 @@ enum LogUploader {
+         let system = "iOS"
+         #endif
+         request.setValue("\(GameSettings.shared.tier.model) · \(system) \(UIDevice.current.systemVersion) · \(GameSettings.shared.tier.memoryLimitMB) MB limit", forHTTPHeaderField: "X-Device")
+-        request.setValue(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?", forHTTPHeaderField: "X-App-Version")
++        request.setValue(TTGTAContext.bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?", forHTTPHeaderField: "X-App-Version")
+         request.setValue(String(note.prefix(400)).addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "", forHTTPHeaderField: "X-Note")
+         URLSession.shared.uploadTask(with: request, from: body) { data, response, error in
+             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+diff --git a/app/App/MacCursor.swift b/app/App/MacCursor.swift
+index 120863f..8495ffa 100644
+--- a/app/App/MacCursor.swift
++++ b/app/App/MacCursor.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ #if targetEnvironment(macCatalyst)
+diff --git a/app/App/MacText.swift b/app/App/MacText.swift
+index d42b131..de78e6f 100644
+--- a/app/App/MacText.swift
++++ b/app/App/MacText.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// The Mac app's own wording for text written for the iPhone (On My iPhone, Tap, iOS). AppLanguage.choose
+diff --git a/app/App/ModInstaller.swift b/app/App/ModInstaller.swift
+index 5aa37fe..8233e60 100644
+--- a/app/App/ModInstaller.swift
++++ b/app/App/ModInstaller.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Installs a downloaded PC mod (GTA-69): unpacks it (zip, rar), works out where each file belongs and
+@@ -24,7 +25,7 @@ enum ModInstaller {
+     }
+     struct Installed { let name: String; let enabled: Bool; let files: Int; let url: URL; let waiting: Int }
+ 
+-    static var modsFolder: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Mods") }
++    static var modsFolder: URL { TTGTAContext.documents.appendingPathComponent("Mods") }
+     static var indexFile: URL { FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("game-file-index.txt") }
+     static var hasGameIndex: Bool { FileManager.default.fileExists(atPath: indexFile.path) }
+ 
+@@ -385,16 +386,16 @@ enum ModInstaller {
+     static var gameRunning = false
+     private static let pendingKey = "modsPendingChanges"
+     /// Queued changes by mod name: "on", "off" or "remove".
+-    static var pending: [String: String] { UserDefaults.standard.dictionary(forKey: pendingKey) as? [String: String] ?? [:] }
++    static var pending: [String: String] { TTGTAContext.defaults.dictionary(forKey: pendingKey) as? [String: String] ?? [:] }
+     private static func queue(_ name: String, _ change: String?) {
+         var all = pending; all[name] = change
+-        UserDefaults.standard.set(all, forKey: pendingKey)
++        TTGTAContext.defaults.set(all, forKey: pendingKey)
+     }
+     /// At launch, before the game reads the Mods folder: the changes made while it was running.
+     static func applyPending() {
+         let changes = pending
+         guard !changes.isEmpty else { return }
+-        UserDefaults.standard.removeObject(forKey: pendingKey)
++        TTGTAContext.defaults.removeObject(forKey: pendingKey)
+         for mod in installed() {
+             switch changes[mod.name] {
+             case "remove"?: try? remove(mod)
+diff --git a/app/App/ModKeys.swift b/app/App/ModKeys.swift
+index afe9437..8d3cbeb 100644
+--- a/app/App/ModKeys.swift
++++ b/app/App/ModKeys.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// A script mod's keys, found before it runs (GTA-179), the on-screen buttons the player made for them (GTA-180) and
+@@ -265,9 +266,9 @@ struct ModButton: Codable, Equatable {
+     static let changed = Notification.Name("modButtonsChanged")
+     private static let storeKey = "modButtons"
+     static var all: [ModButton] {
+-        get { UserDefaults.standard.data(forKey: storeKey).flatMap { try? JSONDecoder().decode([ModButton].self, from: $0) } ?? [] }
++        get { TTGTAContext.defaults.data(forKey: storeKey).flatMap { try? JSONDecoder().decode([ModButton].self, from: $0) } ?? [] }
+         set {
+-            UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: storeKey)
++            TTGTAContext.defaults.set(try? JSONEncoder().encode(newValue), forKey: storeKey)
+             NotificationCenter.default.post(name: changed, object: nil)
+         }
+     }
+@@ -290,11 +291,11 @@ enum ModKeyRemap {
+     /// Mod name -> (the mod's key -> the key that answers it).
+     static var all: [String: [Int: Int]] {
+         get {
+-            let raw = UserDefaults.standard.dictionary(forKey: storeKey) as? [String: [String: Int]] ?? [:]
++            let raw = TTGTAContext.defaults.dictionary(forKey: storeKey) as? [String: [String: Int]] ?? [:]
+             return raw.mapValues { Dictionary(uniqueKeysWithValues: $0.compactMap { k, v in Int(k).map { ($0, v) } }) }
+         }
+         set {
+-            UserDefaults.standard.set(newValue.filter { !$0.value.isEmpty }.mapValues { Dictionary(uniqueKeysWithValues: $0.map { (String($0.key), $0.value) }) }, forKey: storeKey)
++            TTGTAContext.defaults.set(newValue.filter { !$0.value.isEmpty }.mapValues { Dictionary(uniqueKeysWithValues: $0.map { (String($0.key), $0.value) }) }, forKey: storeKey)
+             apply()
+         }
+     }
+diff --git a/app/App/ModKeysListViewController.swift b/app/App/ModKeysListViewController.swift
+index 1fa237c..c542233 100644
+--- a/app/App/ModKeysListViewController.swift
++++ b/app/App/ModKeysListViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// Settings › Mods › (a script mod): the keys it uses and what for, read from its .ini settings and its code before it
+diff --git a/app/App/ModKeysView.swift b/app/App/ModKeysView.swift
+index 8cde158..e7dfe35 100644
+--- a/app/App/ModKeysView.swift
++++ b/app/App/ModKeysView.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// Keys for script mods (.asi, GTA-69). PC mods are driven by keyboard keys (Simple Trainer opens with F3,
+@@ -35,8 +36,8 @@ final class ModKeysView: UIView, UIKeyInput {
+     private static let pinsKey = "modKeysPinned"
+     private static let menuKeysKey = "modKeysMenuKeys"
+     private var pinned: [Int] {
+-        get { UserDefaults.standard.array(forKey: Self.pinsKey) as? [Int] ?? [] }
+-        set { UserDefaults.standard.set(newValue, forKey: Self.pinsKey) }
++        get { TTGTAContext.defaults.array(forKey: Self.pinsKey) as? [Int] ?? [] }
++        set { TTGTAContext.defaults.set(newValue, forKey: Self.pinsKey) }
+     }
+ 
+     override init(frame: CGRect) {
+@@ -130,8 +131,8 @@ final class ModKeysView: UIView, UIKeyInput {
+         // Menu keys: learned from what opened a menu (kept across launches), named by the mod's .ini,
+         // otherwise the F-keys the mods check.
+         let learnedNow = (1..<256).filter { opens[$0] > 0 && Self.name($0) != nil }
+-        var remembered = UserDefaults.standard.array(forKey: Self.menuKeysKey) as? [Int] ?? []
+-        if !Set(learnedNow).isSubset(of: remembered) { remembered = Array(Set(remembered).union(learnedNow)).sorted(); UserDefaults.standard.set(remembered, forKey: Self.menuKeysKey) }
++        var remembered = TTGTAContext.defaults.array(forKey: Self.menuKeysKey) as? [Int] ?? []
++        if !Set(learnedNow).isSubset(of: remembered) { remembered = Array(Set(remembered).union(learnedNow)).sorted(); TTGTAContext.defaults.set(remembered, forKey: Self.menuKeysKey) }
+         var chips = learnedNow.sorted { opens[$0] > opens[$1] }
+         chips += (1..<256).filter { hinted[$0] != 0 && !chips.contains($0) && Self.name($0) != nil }
+         chips += remembered.filter { !chips.contains($0) && (closed[$0] != 0 || info.keyboardHandler) }
+diff --git a/app/App/ModsViewController.swift b/app/App/ModsViewController.swift
+index 14dd6f8..3e3d57a 100644
+--- a/app/App/ModsViewController.swift
++++ b/app/App/ModsViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ import UniformTypeIdentifiers
+ 
+diff --git a/app/App/NativeCheats.swift b/app/App/NativeCheats.swift
+index 6b0649c..52d2d26 100644
+--- a/app/App/NativeCheats.swift
++++ b/app/App/NativeCheats.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// One thing a Cheats row does in the game. PGQueueCheat runs it on the game thread once play resumes.
+diff --git a/app/App/NativePortViewController.swift b/app/App/NativePortViewController.swift
+index f073c4a..bd8267f 100644
+--- a/app/App/NativePortViewController.swift
++++ b/app/App/NativePortViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ import MetalKit
+ import GameController
+@@ -188,6 +189,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+     private let modKeys = ModKeysView(frame: .zero)
+     private let gyro = GyroInput()
+     private var engineStarted = false
++    var returnToGameBox: (() -> Void)?
+     /// The app was in the background at least once since it opened (the log's "App back in the foreground.").
+     private var wasInBackground = false
+     /// leftApp ran for the current time away (reset when the app is active again).
+@@ -463,6 +465,10 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+ 
+     override func viewDidLoad() {
+         super.viewDidLoad()
++        home.onReturnToGameBox = { [weak self] in
++            guard let self, !self.engineStarted else { return }
++            self.returnToGameBox?()
++        }
+         UIApplication.shared.isIdleTimerDisabled = true
+         let device = MTLCreateSystemDefaultDevice()
+         metalView = MTKView(frame: .zero, device: device)
+@@ -635,12 +641,12 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+             home.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+         ])
+         #endif
+-        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+-        logFile = directory.appendingPathComponent("native-port.log")
++        let directory = TTGTAContext.documents
++        logFile = directory.appendingPathComponent("gamebox-native-port.log")
+         // Keep the previous run's log: after a crash it is the one worth sharing (Settings, Share log).
+         // Only a run that started the game replaces it, so opening the app a few times after a crash
+         // (without playing) doesn't push the crash out.
+-        let previous = directory.appendingPathComponent("native-port-previous.log")
++        let previous = directory.appendingPathComponent("gamebox-native-port-previous.log")
+         let lastRunPlayed = ((try? FileManager.default.attributesOfItem(atPath: logFile!.path)[.size] as? NSNumber)?.intValue ?? 0) > 16_384
+         // A run that stopped is kept on its own until a log is sent, however often the game is started again (GTA-159).
+         let stopReason = RunEnd.keepIfStopped(log: logFile!, becomesPrevious: lastRunPlayed || !FileManager.default.fileExists(atPath: previous.path))
+@@ -704,7 +710,6 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+         // A newer release on GitHub: say so once per version, pointing to the Telegram group.
+         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+             guard let self else { return }
+-            UpdateCheck.run(from: self) { [weak self] line in DispatchQueue.main.async { self?.appendLog(line) } }
+         }
+         // GTA-153: after an update, mods the previous version had on but didn't use stay off; after a start with
+         // mods that didn't finish, the mods are the first suspect (17% of starts with mods failed on v1.4.4, 1.5% without).
+@@ -894,7 +899,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+         let arguments = ProcessInfo.processInfo.arguments
+         let forced = ProcessInfo.processInfo.environment["PG_TEST_INTRO"] != nil // automated launches skip it unless asked
+         guard introView == nil, forced || !arguments.contains("--boot-engine"), ProcessInfo.processInfo.environment["PG_BENCHMARK"] == nil,
+-              let url = Bundle.main.url(forResource: "intro", withExtension: "mp4") else { return }
++              let url = TTGTAContext.bundle.url(forResource: "intro", withExtension: "mp4") else { return }
+         let intro = IntroVideoView(frame: view.bounds, url: url, muted: arguments.contains("--mute"))
+         intro.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+         intro.finished = { [weak self, weak intro] in
+@@ -1566,7 +1571,7 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+ 
+     /// Mods (GTA-69): once per set of mod files, says that mods can break things and where mod help is.
+     private func noticeMods() {
+-        let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Mods")
++        let folder = TTGTAContext.documents.appendingPathComponent("Mods")
+         guard let walk = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else { return }
+         ModInstaller.placeWaitingFiles()
+         // Switched-off mods (folders ending in .off) and files still waiting to be placed don't count.
+@@ -1586,11 +1591,11 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+         guard count > 0 else { return }
+         appendLog("Mods folder: \(count) file\(count == 1 ? "" : "s").")
+         let key = "modsNoticeSignature", value = "\(count)-\(signature)"
+-        guard UserDefaults.standard.string(forKey: key) != value else { return }
++        guard TTGTAContext.defaults.string(forKey: key) != value else { return }
+         #if targetEnvironment(simulator)
+         if ProcessInfo.processInfo.environment["PG_TEST_NO_MODS_NOTICE"] != nil { return }
+         #endif
+-        UserDefaults.standard.set(value, forKey: key)
++        TTGTAContext.defaults.set(value, forKey: key)
+         showWhenFree(title: AppLanguage.choose("Mods are on"),
+                      message: AppLanguage.interpolate(AppLanguage.choose("{arg0} mod files are active. Mods can cause crashes and glitches that we can't fix: ask about them in the Mods topic on Telegram. Send logs only for problems that also happen without mods."), [String(count)]))
+     }
+@@ -1600,11 +1605,11 @@ final class NativePortViewController: UIViewController, MTKViewDelegate {
+     private func noticeLowMemory() {
+         #if !targetEnvironment(macCatalyst)
+         let limit = GameSettings.shared.tier.memoryLimitMB, key = "lowMemoryNoticeShown"
+-        guard lowMemoryDevice, !UserDefaults.standard.bool(forKey: key) else { return }
++        guard lowMemoryDevice, !TTGTAContext.defaults.bool(forKey: key) else { return }
+         #if targetEnvironment(simulator)
+         if ProcessInfo.processInfo.environment["PG_TEST_NO_MODS_NOTICE"] != nil { return }   // the harness: no notices
+         #endif
+-        UserDefaults.standard.set(true, forKey: key)
++        TTGTAContext.defaults.set(true, forKey: key)
+         var message = AppLanguage.interpolate(AppLanguage.choose("iOS gives the game only about {arg0} MB on this device, less than the city needs. Expect a less detailed city and textures that load late or stay missing. That's normal here, so there's no need to report it."), [String(limit)])
+         if DeviceTier.increasedMemoryGranted != true {
+             message += AppLanguage.choose("\n\nMore memory helps the most: install the app with AltStore 2.3 or newer, which adds extra memory on a free Apple ID.")
+diff --git a/app/App/RunEnd.swift b/app/App/RunEnd.swift
+index cc9b32f..338b2f4 100644
+--- a/app/App/RunEnd.swift
++++ b/app/App/RunEnd.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ #if !targetEnvironment(macCatalyst)
+ import MetricKit
+@@ -12,7 +13,7 @@ enum RunEnd {
+     static let stoppedName = "native-port-stopped.log"
+     static let diagnosticsName = "ios-diagnostics.log"
+     private static var defaults: UserDefaults { .standard }
+-    private static var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
++    private static var documents: URL { TTGTAContext.documents }
+ 
+     /// Whether the game runs in the foreground right now (it started, and the app is active).
+     static func playing(_ on: Bool) { defaults.set(on, forKey: "runEndPlaying") }
+diff --git a/app/App/SaveImport.swift b/app/App/SaveImport.swift
+index d7138a3..080e171 100644
+--- a/app/App/SaveImport.swift
++++ b/app/App/SaveImport.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Settings › Game mode › Import a Story save: a save file from a PC copy or a friend (SGTA5…) goes into a free
+diff --git a/app/App/SelfRadio.swift b/app/App/SelfRadio.swift
+index 18021df..a93b989 100644
+--- a/app/App/SelfRadio.swift
++++ b/app/App/SelfRadio.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import AVFoundation
+ import UIKit
+ import UniformTypeIdentifiers
+@@ -18,7 +19,7 @@ func showInFiles(_ folder: URL) {
+ /// them with iOS's own decoders (MP3, AAC/M4A, ALAC, WAV, AIFF, FLAC). The game shows the station once it has
+ /// at least three songs.
+ enum SelfRadio {
+-    static var folder: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Self Radio") }
++    static var folder: URL { TTGTAContext.documents.appendingPathComponent("Self Radio") }
+     static let extensions: Set<String> = ["mp3", "m4a", "aac", "mp4", "wav", "aif", "aiff", "aifc", "caf", "flac"]
+     /// The game lists Self Radio only with more than two songs (audRadioStation::HasUserTracks).
+     static let minimumSongs = 3
+diff --git a/app/App/SettingsHomeViewController.swift b/app/App/SettingsHomeViewController.swift
+index 9132917..10f4769 100644
+--- a/app/App/SettingsHomeViewController.swift
++++ b/app/App/SettingsHomeViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// The first Settings page: one row per category, each opening its own page (a SettingsViewController
+diff --git a/app/App/SettingsViewController.swift b/app/App/SettingsViewController.swift
+index c5ed504..384a4ad 100644
+--- a/app/App/SettingsViewController.swift
++++ b/app/App/SettingsViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// Graphics and control options. Before launch every change applies on Play;
+diff --git a/app/App/StopCause.swift b/app/App/StopCause.swift
+index 3a4c833..b48187e 100644
+--- a/app/App/StopCause.swift
++++ b/app/App/StopCause.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// Why the game stopped, from the lines the engine logged just before (GTA-178): the game's own "Fatal Error:" message,
+diff --git a/app/App/StoryCheats.swift b/app/App/StoryCheats.swift
+index 6783f68..db5f83d 100644
+--- a/app/App/StoryCheats.swift
++++ b/app/App/StoryCheats.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import Foundation
+ 
+ /// One press of the game's own controller. Triggers are axes, not buttons.
+diff --git a/app/App/SymbolPickerViewController.swift b/app/App/SymbolPickerViewController.swift
+index 1f0c113..b76d258 100644
+--- a/app/App/SymbolPickerViewController.swift
++++ b/app/App/SymbolPickerViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// Every SF Symbol this iOS has, in Apple's order, as a grid with search (GTA-210): icons for on-screen mod buttons.
+@@ -5,7 +6,7 @@ import UIKit
+ final class SymbolPickerViewController: UICollectionViewController, UISearchResultsUpdating {
+     private struct Symbol { let name: String; let words: String }
+     private static let all: [Symbol] = {
+-        guard let url = Bundle.main.url(forResource: "sf-symbols", withExtension: "json"), let data = try? Data(contentsOf: url),
++        guard let url = TTGTAContext.bundle.url(forResource: "sf-symbols", withExtension: "json"), let data = try? Data(contentsOf: url),
+               let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String]] else { return [] }
+         return rows.compactMap { row in
+             guard row.count >= 2 else { return nil }
+diff --git a/app/App/Theme.swift b/app/App/Theme.swift
+index 2db3f81..7402c06 100644
+--- a/app/App/Theme.swift
++++ b/app/App/Theme.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// The look shared by the start screen, the game files screens and Settings: the app icon's sunset
+@@ -7,12 +8,12 @@ enum Theme {
+     /// The community: official releases, help and announcements.
+     static let telegramURL = URL(string: "https://t.me/fivestarport")!
+     static let appVersion: String = {
+-        let info = Bundle.main.infoDictionary
++        let info = TTGTAContext.bundle.infoDictionary
+         // Each release has one build number, so the marketing version alone identifies it.
+         return "v\(info?["CFBundleShortVersionString"] as? String ?? "?")" + (isLite ? " Lite" : "")
+     }()
+     /// The Lite build for iPhones with little memory: Info.plist PGLiteMode (build_ipa.sh --lite), or PG_LITE=1.
+-    static let isLite: Bool = (Bundle.main.object(forInfoDictionaryKey: "PGLiteMode") as? Bool ?? false)
++    static let isLite: Bool = (TTGTAContext.bundle.object(forInfoDictionaryKey: "PGLiteMode") as? Bool ?? false)
+         || (ProcessInfo.processInfo.environment["PG_LITE"].map { $0 != "0" } ?? false)
+     static let accent = UIColor(red: 1.0, green: 0.62, blue: 0.18, alpha: 1)        // sunset orange
+     static let accentDeep = UIColor(red: 0.95, green: 0.36, blue: 0.16, alpha: 1)
+@@ -47,7 +48,7 @@ enum Theme {
+     static func backdrop(image name: String, darken: CGFloat = 0.55) -> UIView {
+         let view = UIView()
+         view.backgroundColor = night
+-        let art = UIImageView(image: UIImage(named: name))
++        let art = UIImageView(image: UIImage(named: name, in: TTGTAContext.bundle, compatibleWith: nil))
+         art.contentMode = .scaleAspectFill
+         art.clipsToBounds = true
+         let shade = GradientView(colors: [night.withAlphaComponent(0.92), night.withAlphaComponent(darken), night.withAlphaComponent(0.05)],
+@@ -69,7 +70,7 @@ enum Theme {
+     static func dimmedBackdrop(image name: String) -> UIView {
+         let view = UIView()
+         view.backgroundColor = night
+-        let art = UIImageView(image: UIImage(named: name))
++        let art = UIImageView(image: UIImage(named: name, in: TTGTAContext.bundle, compatibleWith: nil))
+         art.contentMode = .scaleAspectFill
+         art.clipsToBounds = true
+         let shade = UIView()
+diff --git a/app/App/TouchControlsView.swift b/app/App/TouchControlsView.swift
+index 7073f0e..f156174 100644
+--- a/app/App/TouchControlsView.swift
++++ b/app/App/TouchControlsView.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// What the player is doing; picked automatically from engine state.
+@@ -121,7 +122,7 @@ final class ControlButton: UIView {
+                 ?? UIImage(systemName: "circle", withConfiguration: UIImage.SymbolConfiguration(weight: .bold)))?.withRenderingMode(.alwaysTemplate)
+             return
+         }
+-        let image = iconName.hasPrefix("text:") ? ControlStyle.textIcon(String(iconName.dropFirst(5))) : UIImage(named: "icon_" + iconName)
++        let image = iconName.hasPrefix("text:") ? ControlStyle.textIcon(String(iconName.dropFirst(5))) : UIImage(named: "icon_" + iconName, in: TTGTAContext.bundle, compatibleWith: nil)
+             ?? UIImage(systemName: ControlStyle.fallbackSymbol[iconName] ?? "circle", withConfiguration: UIImage.SymbolConfiguration(weight: .bold))
+             ?? UIImage(systemName: ControlStyle.olderSymbol[iconName] ?? "circle", withConfiguration: UIImage.SymbolConfiguration(weight: .bold))
+         icon.image = image?.withRenderingMode(.alwaysTemplate)
+diff --git a/app/App/UpdateCheck.swift b/app/App/UpdateCheck.swift
+index acbac12..cc9a6c5 100644
+--- a/app/App/UpdateCheck.swift
++++ b/app/App/UpdateCheck.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// On launch, asks the website for the newest release, and when it is newer than this app, a popup points to its
+@@ -11,7 +12,7 @@ enum UpdateCheck {
+     private static let shownKey = "updatePromptShownFor"
+ 
+     static func run(from presenter: UIViewController, log: @escaping (String) -> Void) {
+-        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
++        let current = TTGTAContext.bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+         let request = URLRequest(url: latestRelease, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+         URLSession.shared.dataTask(with: request) { data, response, _ in
+             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+@@ -24,7 +25,7 @@ enum UpdateCheck {
+             let post = (answer?["post"] as? String).flatMap(URL.init(string:)).flatMap { $0.host == "t.me" ? $0 : nil } ?? releasesTopic
+             guard isNewer(latest, than: current) else { log("Update check: v\(current) is the newest (the website has v\(latest))."); return }
+             DispatchQueue.main.async {
+-                guard UserDefaults.standard.string(forKey: shownKey) != latest else {
++                guard TTGTAContext.defaults.string(forKey: shownKey) != latest else {
+                     log("Update check: v\(latest) is out (this is v\(current)); already told the player.")
+                     return
+                 }
+@@ -53,7 +54,7 @@ enum UpdateCheck {
+             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { show(latest: latest, current: current, post: post, from: presenter) }
+             return
+         }
+-        UserDefaults.standard.set(latest, forKey: shownKey)
++        TTGTAContext.defaults.set(latest, forKey: shownKey)
+         let alert = UIAlertController(
+             title: AppLanguage.choose("Update available"),
+             message: AppLanguage.interpolate(AppLanguage.choose("Version {arg0} is out. You have {arg1}.\n\nThe new IPA is posted in the Releases topic of our Telegram group. Install it the same way you installed this one."), ["v" + latest, "v" + current]),
+diff --git a/app/App/VehicleSpawnViewController.swift b/app/App/VehicleSpawnViewController.swift
+index 3fd6318..bf060e6 100644
+--- a/app/App/VehicleSpawnViewController.swift
++++ b/app/App/VehicleSpawnViewController.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import UIKit
+ 
+ /// One vehicle in Cheats › Spawn vehicle, copied from the engine's list (PGVehicleEntry).
+diff --git a/app/App/VirtualPad.swift b/app/App/VirtualPad.swift
+index 2aeef29..c8afcc1 100644
+--- a/app/App/VirtualPad.swift
++++ b/app/App/VirtualPad.swift
+@@ -1,3 +1,4 @@
++import GTAEmbeddedABI
+ import GameController
+ 
+ /// Buttons of the engine's own pad (see PGPadState in EngineHost.h). Actions
+diff --git a/app/Source/MetalGraphicsHost.mm b/app/Source/MetalGraphicsHost.mm
+index 8a45670..9e7b6a3 100644
+--- a/app/Source/MetalGraphicsHost.mm
++++ b/app/Source/MetalGraphicsHost.mm
+@@ -1,3 +1,4 @@
++#import "TTGTAEmbeddedContext.h"
+ // The app's graphics entry points (NativeGraphics.h), served by the native Metal renderer.
+ #include "NativeGraphics.h"
+ #include "MetalRenderer/MetalRenderer.h"
+@@ -36,7 +37,7 @@ int PGGPUReadsBC(void) {
+ }
+ int PGTextureRatioPercent(void) {
+ 	if (PGGPUReadsBC()) return 100;
+-	NSInteger stored = [[NSUserDefaults standardUserDefaults] integerForKey:textureRatioKey()];
++	NSInteger stored = [TTGTADefaults() integerForKey:textureRatioKey()];
+ 	if (stored >= 100 && stored <= 400) return (int)stored;
+ 	return [textureRatioKey() isEqualToString:@"pgTextureRatioASTC3"] ? 140 : 200;
+ }
+@@ -44,7 +45,7 @@ void PGNoteTextureRatio(int64_t gpuBytes, int64_t gameBytes) {
+ 	if (PGGPUReadsBC() || gameBytes < (128ll << 20) || gpuBytes <= 0) return;		// too little loaded to say
+ 	NSInteger ratio = (NSInteger)(gpuBytes * 100 / gameBytes);
+ 	ratio = ratio < 100 ? 100 : ratio > 400 ? 400 : ratio;
+-	NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
++	NSUserDefaults *defaults = TTGTADefaults();
+ 	NSInteger old = [defaults integerForKey:textureRatioKey()];
+ 	[defaults setInteger:old >= 100 && old <= 400 ? (old * 3 + ratio) / 4 : ratio forKey:textureRatioKey()];
+ }
+diff --git a/app/Source/MetalRenderer/MRFrameReports.mm b/app/Source/MetalRenderer/MRFrameReports.mm
+index 1a69fb9..420a79b 100644
+--- a/app/Source/MetalRenderer/MRFrameReports.mm
++++ b/app/Source/MetalRenderer/MRFrameReports.mm
+@@ -1,3 +1,4 @@
++#import "TTGTAEmbeddedContext.h"
+ // Optional frame reports (launch argument --frame-reports): bounded performance aggregates every 15 seconds of world
+ // rendering, sent as a GET to your own game-file server (its access log then holds them). Off by default. No asset
+ // contents, input, position or persistent device IDs.
+@@ -69,7 +70,7 @@ void frameReportsInstall(id<MTLDevice> metalDevice) {
+ 	device = metalDevice;
+ 	enabled = [NSProcessInfo.processInfo.arguments containsObject:@"--frame-reports"];
+ 	if (!enabled) { pg_log("Frame reports disabled."); return; }
+-	build = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"probe";
++	build = [TTGTABundle() objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"probe";
+ 	runId = NSUUID.UUID.UUIDString;
+ 	NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+ 	configuration.URLCache = nil; configuration.HTTPCookieStorage = nil; configuration.HTTPMaximumConnectionsPerHost = 1;
+diff --git a/app/Source/MetalRenderer/MRRenderer.mm b/app/Source/MetalRenderer/MRRenderer.mm
+index bfe5f08..24674d2 100644
+--- a/app/Source/MetalRenderer/MRRenderer.mm
++++ b/app/Source/MetalRenderer/MRRenderer.mm
+@@ -1,3 +1,4 @@
++#import "TTGTAEmbeddedContext.h"
+ // Native Metal renderer: executes the game's D3D11 command ring directly on Metal.
+ //
+ // One renderer thread consumes the ring (wgpu_backend.h protocol of the web build; its JavaScript renderer wgpu_worker.js is the reference
+@@ -1079,7 +1080,7 @@ static void uploadTextureInner(const uint32_t *p) {
+ 		static int dumpKind = getenv("PG_DUMP_BC") ? atoi(getenv("PG_DUMP_BC")) : 0;
+ 		static size_t dumped;
+ 		if (dumpKind && dumpKind == (int)t->bcKind && dumped < (64u << 20) && d == 1) {
+-			static FILE *dump = fopen([[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
++			static FILE *dump = fopen([[TTGTADocuments()
+ 			                           stringByAppendingPathComponent:@"bc3-blocks.bin"] fileSystemRepresentation], "wb");
+ 			const uint32_t rowBytes = (w + 3) / 4 * bcBlockBytes(t->bcKind);
+ 			if (dump && rowBytes <= bpr) for (uint32_t row = 0; row < (h + 3) / 4 && (size_t)row * bpr + rowBytes <= size; row++) {
+@@ -2798,7 +2799,7 @@ static void savePNG(id<MTLBuffer> buf, uint32_t w, uint32_t h, uint32_t bpr, std
+ 	CGContextRef bitmap = CGBitmapContextCreate(buf.contents, w, h, 8, bpr, color, kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst);
+ 	CGImageRef image = CGBitmapContextCreateImage(bitmap);
+ 	NSData *png = UIImagePNGRepresentation([UIImage imageWithCGImage:image]);
+-	NSString *folder = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"NativeFrames"];
++	NSString *folder = [TTGTADocuments() stringByAppendingPathComponent:@"NativeFrames"];
+ 	NSString *full = [NSString stringWithUTF8String:name.c_str()];
+ 	// "folder/name": one subfolder of NativeFrames (GTA-77 test shots keep each session's pictures together)
+ 	NSString *sub = full.stringByDeletingLastPathComponent.lastPathComponent;
+@@ -2880,7 +2881,7 @@ static void capture(Texture *t, const std::string &name, id<MTLRenderPipelineSta
+ static std::vector<TestShot> gShots;
+ static int gShotFrames = -1;		// -1: the first shot's settings are not applied yet
+ static void writeCensus(const std::string &name) {
+-	NSString *folder = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"NativeFrames"];
++	NSString *folder = [TTGTADocuments() stringByAppendingPathComponent:@"NativeFrames"];
+ 	NSString *full = [NSString stringWithUTF8String:name.c_str()];
+ 	NSString *sub = full.stringByDeletingLastPathComponent.lastPathComponent;
+ 	if (sub.length && ![sub isEqualToString:@".."] && ![sub isEqualToString:@"."]) folder = [folder stringByAppendingPathComponent:sub];
+@@ -2954,7 +2955,7 @@ static void present(uint32_t texId) {
+ 		fclose(T.f); T.f = nullptr; T.state = 3;
+ 		logf("Metal renderer: traced frame written (%llu draws, %zu targets)", (unsigned long long)T.n, T.rts.size());
+ 	} else if (T.state == 1 && CACurrentMediaTime() >= T.at) {
+-		NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
++		NSString *docs = TTGTADocuments();
+ 		T.f = fopen([docs stringByAppendingPathComponent:@"mr-trace.txt"].UTF8String, "w");
+ 		T.state = T.f ? 2 : 3;
+ 	} else if (T.state == 0 && R->worldSent) {
+@@ -3019,7 +3020,7 @@ static void createShader(const uint32_t *p) {
+ 	if (!shaderListChecked) {
+ 		shaderListChecked = true;
+ 		const char *env = getenv("PG_MR_TRACE");
+-		NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
++		NSString *docs = TTGTADocuments();
+ 		if (env && *env) shaderList = fopen([docs stringByAppendingPathComponent:@"mr-shaders.txt"].UTF8String, "w");
+ 	}
+ 	if (shaderList) { fprintf(shaderList, "%u %u %s %s\n", p[0], p[1], hash, s->info ? s->info->label.c_str() : "-"); fflush(shaderList); }
+@@ -3574,7 +3575,7 @@ static bool setup() {
+ #else
+ 	NSString *name = @"shaders-iphoneos";
+ #endif
+-	return [NSBundle.mainBundle URLForResource:name withExtension:@"metallib"] != nil;
++	return [TTGTABundle() URLForResource:name withExtension:@"metallib"] != nil;
+ }
+ 
+ static void startPeriodicShots(void);
+diff --git a/app/Source/MetalRenderer/MRShaders.mm b/app/Source/MetalRenderer/MRShaders.mm
+index 2dae414..8204e9a 100644
+--- a/app/Source/MetalRenderer/MRShaders.mm
++++ b/app/Source/MetalRenderer/MRShaders.mm
+@@ -1,3 +1,4 @@
++#import "TTGTAEmbeddedContext.h"
+ // Shader library, reflection table and D3D11 format tables of the native Metal renderer.
+ #include "MRInternal.h"
+ #include <TargetConditionals.h>
+@@ -65,11 +66,11 @@ bool loadShaderLibrary(id<MTLDevice> device) {
+ #else
+ 	NSString *name = @"shaders-iphoneos";
+ #endif
+-	NSURL *url = [NSBundle.mainBundle URLForResource:name withExtension:@"metallib"];
++	NSURL *url = [TTGTABundle() URLForResource:name withExtension:@"metallib"];
+ 	NSError *error = nil;
+ 	library = url ? [device newLibraryWithURL:url error:&error] : nil;
+ 	if (!library) { logf("Metal renderer: shader library %s missing (%s)", name.UTF8String, error.localizedDescription.UTF8String ?: "not bundled"); return false; }
+-	NSString *path = [NSBundle.mainBundle pathForResource:@"shader-reflection" ofType:@"jsonl"];
++	NSString *path = [TTGTABundle() pathForResource:@"shader-reflection" ofType:@"jsonl"];
+ 	NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
+ 	if (!data) { logf("Metal renderer: shader reflection missing"); return false; }
+ 	const char *bytes = (const char *)data.bytes, *end = bytes + data.length;
+diff --git a/app/Source/NativeAssets.m b/app/Source/NativeAssets.m
+index b03ebda..5f6d002 100644
+--- a/app/Source/NativeAssets.m
++++ b/app/Source/NativeAssets.m
+@@ -1,3 +1,4 @@
++#import "TTGTAEmbeddedContext.h"
+ #import <Foundation/Foundation.h>
+ #include <TargetConditionals.h>
+ #include "HostInternal.h"
+@@ -15,7 +16,7 @@
+ // A language choice requested by the native app when the WASM engine boots.
+ // This does not guarantee the underlying web game uses the locale or has the necessary fonts.
+ const char *PGSelectedGameLanguage(void) {
+-  NSString *chosen = [[NSUserDefaults standardUserDefaults] stringForKey:@"gtaPortAppLanguage"];
++  NSString *chosen = [TTGTADefaults() stringForKey:@"gtaPortAppLanguage"];
+   static const char *supported[] = {
+     "en-US", "fr-FR", "it-IT", "de-DE", "es-ES", "ja-JP", "ko-KR",
+     "pl-PL", "pt-BR", "ru-RU", "zh-CN", "es-MX", "zh-TW"
+@@ -121,7 +122,7 @@ static BOOL assetBlockInFlight(PGAssetCondition *condition,uint64_t block){
+   const char *test=getenv("PG_MODS_FOLDER");
+   if(test&&*test&&test[0]!='/')return [NSTemporaryDirectory() stringByAppendingPathComponent:@(test)];   // a phone test: a folder in the app's tmp (empty: no mods)
+   if(test&&*test)return @(test);
+-  return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"Mods"];
++  return [TTGTADocuments() stringByAppendingPathComponent:@"Mods"];
+ }
+ void PGSetModsOff(bool off){
+   if(modsOff==off||modsLocked)return;
+@@ -1083,12 +1084,12 @@ void pg_assets_prewarm(void){
+   if(!assetStreamSimulation||[NSProcessInfo.processInfo.arguments containsObject:@"--skip-asset-warm"]){pg_log("Simulator startup asset warming skipped.");return;}
+ #endif
+   @autoreleasepool {
+-    NSString *path=[NSBundle.mainBundle pathForResource:@"bootset_native" ofType:@"json"];
+-    NSString *metadataPath=[NSBundle.mainBundle pathForResource:@"bootset_native.summary" ofType:@"json"];
++    NSString *path=[TTGTABundle() pathForResource:@"bootset_native" ofType:@"json"];
++    NSString *metadataPath=[TTGTABundle() pathForResource:@"bootset_native.summary" ofType:@"json"];
+     NSData *metadataData=metadataPath?[NSData dataWithContentsOfFile:metadataPath]:nil;
+     NSDictionary *metadata=metadataData?[NSJSONSerialization JSONObjectWithData:metadataData options:0 error:nil]:nil;
+     if(![metadata[@"version"] isEqual:assetVersion])path=nil;
+-    if(!path)path=[NSBundle.mainBundle pathForResource:@"bootset_low" ofType:@"json"];
++    if(!path)path=[TTGTABundle() pathForResource:@"bootset_low" ofType:@"json"];
+     NSData *data=path?[NSData dataWithContentsOfFile:path]:nil;
+     NSArray *boot=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
+     if(![boot isKindOfClass:NSArray.class]){pg_log("Startup asset warm set unavailable; continuing demand loading.");return;}
+diff --git a/app/project.yml b/app/project.yml
+index 10f5972..4edf5c0 100644
+--- a/app/project.yml
++++ b/app/project.yml
+@@ -61,11 +61,14 @@ settings:
+       - $(SRCROOT)/Source/NativeRuntime.h
+       - -fno-optimize-sibling-calls
+       - -frounding-math
+-    SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/Source/Native-Bridging-Header.h
+-    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
++    SWIFT_INCLUDE_PATHS: $(SRCROOT)/EmbeddedImports
++    DEFINES_MODULE: YES
++    SKIP_INSTALL: YES
++    SWIFT_INSTALL_OBJC_HEADER: NO
++    CODE_SIGNING_ALLOWED: NO
+ targets:
+   PlayGTA5Native:
+-    type: application
++    type: framework
+     platform: iOS
+     sources:
+       - App
+@@ -104,11 +107,12 @@ targets:
+       - sdk: libbz2.tbd
+     settings:
+       base:
+-        PRODUCT_BUNDLE_IDENTIFIER: io.github.playgta5ios.app
+-        PRODUCT_NAME: PlayGTA5Native
++        PRODUCT_BUNDLE_IDENTIFIER: com.tonytan.nxgamelibrary.gta-native
++        PRODUCT_NAME: TonTonGTAEmbedded
++        PRODUCT_MODULE_NAME: TonTonGTAEmbeddedRuntime
+         TARGETED_DEVICE_FAMILY: "1,2"
+         # The same app runs on Apple Silicon Macs through Mac Catalyst (GTA-9, Scripts/build_mac.sh).
+-        SUPPORTS_MACCATALYST: YES
++        SUPPORTS_MACCATALYST: NO
+         DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
+         # Paid Apple developer accounts can use App/Full.entitlements (more
+         # memory); free Apple IDs cannot, so the default asks for nothing.
+@@ -133,17 +137,6 @@ targets:
+         LSSupportsOpeningDocumentsInPlace: true
+         CFBundleVersion: "20"
+         UILaunchScreen: {}
+-        # The scene lifecycle (GTA-171): an app built with the iOS 27 SDK stops at launch without it. One window
+-        # (AppDelegate.swift, SceneDelegate); a TV (AirPlay or HDMI) gets its own scene for the game's picture (TVSceneDelegate).
+-        UIApplicationSceneManifest:
+-          UIApplicationSupportsMultipleScenes: false
+-          UISceneConfigurations:
+-            UIWindowSceneSessionRoleApplication:
+-              - UISceneConfigurationName: Default
+-                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+-            UIWindowSceneSessionRoleExternalDisplayNonInteractive:
+-              - UISceneConfigurationName: TV
+-                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).TVSceneDelegate
+         UIRequiresFullScreen: true
+         # Lets the game present above 60 FPS on ProMotion iPhones when the frame rate is unlocked.
+         CADisableMinimumFrameDurationOnPhone: true
+diff --git a/app/App/TonTonEmbeddedEntry.swift b/app/App/TonTonEmbeddedEntry.swift
+new file mode 100644
+index 0000000..708b25c
+--- /dev/null
++++ b/app/App/TonTonEmbeddedEntry.swift
+@@ -0,0 +1,32 @@
++import UIKit
++import GTAEmbeddedABI
++
++enum TTGTAContext {
++    static let bundle: Bundle = TTGTABundle()
++    static let defaults: UserDefaults = TTGTADefaults()
++    static var documents: URL { URL(fileURLWithPath: TTGTADocuments(), isDirectory: true) }
++}
++
++@objc(TonTonGTAEmbeddedEntry)
++final class TonTonGTAEmbeddedEntry: NSObject {
++    private static var controller: NativePortViewController?
++
++    @objc(controllerForSlot:returnToLibrary:)
++    static func controller(forSlot slot: String, returnToLibrary: @escaping () -> Void) -> UIViewController? {
++        guard Thread.isMainThread else { return nil }
++        let documents = URL(fileURLWithPath: slot, isDirectory: true).appendingPathComponent("UserData", isDirectory: true)
++        let manifest = documents.appendingPathComponent("GTA V/data/manifest.json")
++        guard FileManager.default.isReadableFile(atPath: manifest.path) else { return nil }
++        if let previous = controller {
++            previous.returnToGameBox = returnToLibrary
++            return previous
++        }
++        TTGTASetDocuments(documents.path)
++        GameSettings.applyExperimentalSwitches()
++        ModKeyRemap.apply()
++        let game = NativePortViewController()
++        game.returnToGameBox = returnToLibrary
++        controller = game
++        return game
++    }
++}
+diff --git a/app/EmbeddedImports/module.modulemap b/app/EmbeddedImports/module.modulemap
+new file mode 100644
+index 0000000..dba2aa0
+--- /dev/null
++++ b/app/EmbeddedImports/module.modulemap
+@@ -0,0 +1,9 @@
++module GTAEmbeddedABI {
++  header "../Source/EngineHost.h"
++  header "../Source/NativeMemoryBreakdown.h"
++  header "../Source/NativeAssetPreload.h"
++  header "../Source/NativeGraphics.h"
++  header "../Source/../App/GameInstaller/GameInstallerShim.h"
++  header "../Source/TTGTAEmbeddedContext.h"
++  export *
++}
+diff --git a/app/Source/TTGTAEmbeddedContext.h b/app/Source/TTGTAEmbeddedContext.h
+new file mode 100644
+index 0000000..f032cf6
+--- /dev/null
++++ b/app/Source/TTGTAEmbeddedContext.h
+@@ -0,0 +1,11 @@
++#import <Foundation/Foundation.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++NSBundle *TTGTABundle(void);
++NSString *TTGTADocuments(void);
++NSUserDefaults *TTGTADefaults(void);
++void TTGTASetDocuments(NSString *directory);
++#ifdef __cplusplus
++}
++#endif
+diff --git a/app/Source/TTGTAEmbeddedContext.m b/app/Source/TTGTAEmbeddedContext.m
+new file mode 100644
+index 0000000..9a7a851
+--- /dev/null
++++ b/app/Source/TTGTAEmbeddedContext.m
+@@ -0,0 +1,15 @@
++#import "TTGTAEmbeddedContext.h"
++@interface TTGTAResourceAnchor : NSObject
++@end
++@implementation TTGTAResourceAnchor
++@end
++static NSString *TTGTADocumentsPath;
++NSBundle *TTGTABundle(void) { return [NSBundle bundleForClass:TTGTAResourceAnchor.class]; }
++NSString *TTGTADocuments(void) { return TTGTADocumentsPath; }
++void TTGTASetDocuments(NSString *directory) { TTGTADocumentsPath = [directory copy]; }
++NSUserDefaults *TTGTADefaults(void) {
++    static NSUserDefaults *prefs;
++    static dispatch_once_t once;
++    dispatch_once(&once, ^{ prefs = [[NSUserDefaults alloc] initWithSuiteName:@"com.tonytan.nxgamelibrary.gta-native"]; });
++    return prefs;
++}
+diff --git a/app/Scripts/prepare_tonton.py b/app/Scripts/prepare_tonton.py
+new file mode 100644
+index 0000000..8d7e11c
+--- /dev/null
++++ b/app/Scripts/prepare_tonton.py
+@@ -0,0 +1,158 @@
++"""Prepare a reproducible native CPU boot experiment from the local mirror."""
++import argparse
++import hashlib
++from pathlib import Path
++import platform
++import shutil
++import subprocess
++import tarfile
++import urllib.request
++
++root = Path(__file__).resolve().parents[1]
++parser = argparse.ArgumentParser()
++parser.add_argument('--mirror', type=Path, required=True, help='folder containing data/ and b/8b0b5899ed/game.wasm')
++parser.add_argument('--prebuilt-dawn', action='store_true', help=argparse.SUPPRESS)  # accepted for old scripts; Dawn is no longer used
++parser.add_argument('--sdk', action='append', choices=['iphoneos', 'iphonesimulator'], help='Metal library to build (default: iphoneos)')
++options = parser.parse_args()
++def apple_silicon():
++    try: return subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
++    except OSError: return False
++if platform.system() != 'Darwin' or not apple_silicon():
++    raise SystemExit('This preparation script targets an Apple Silicon Mac with Xcode.')
++engine = options.mirror / 'b/8b0b5899ed/game.wasm'
++if hashlib.sha256(engine.read_bytes()).hexdigest() != '11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0':
++    raise SystemExit('The engine does not match the build this native experiment supports.')
++for name in ['Tools', 'Generated', 'Build', 'Resources']:
++    (root / name).mkdir(exist_ok=True)
++
++def run(*args):
++    subprocess.run(args, cwd=root, check=True)
++
++def download(url, destination):
++    with urllib.request.urlopen(url) as response:
++        destination.write_bytes(response.read())
++
++wabt = root / 'Tools/wabt-1.0.42'
++if not wabt.exists():
++    release = 'https://github.com/WebAssembly/wabt/releases/download/1.0.42/'
++    filename = 'wabt-1.0.42-macos-arm64.tar.gz'
++    archive = root / 'Tools/wabt.tar.gz'
++    download(release + filename, archive)
++    checksum = urllib.request.urlopen(release + filename + '.sha256').read().decode().split()[0]
++    if hashlib.sha256(archive.read_bytes()).hexdigest() != checksum:
++        raise SystemExit('WABT archive checksum mismatch.')
++    from safe_extract import extract
++    with tarfile.open(archive) as package:
++        extract(package, root / 'Tools')
++
++simde = root / 'Tools/simde'
++if not simde.exists():
++    run('git', 'clone', '--depth', '1', '--branch', 'v0.8.2', 'https://github.com/simd-everywhere/simde.git', str(simde))
++for upstream, local in [('src/c-writer.cc', 'c-writer-original.cc'), ('src/tools/wasm2c.cc', 'wasm2c-main.cc')]:
++    destination = root / 'Tools' / local
++    if not destination.exists():
++        download('https://raw.githubusercontent.com/WebAssembly/wabt/1.0.42/' + upstream, destination)
++run('python3', 'Scripts/patch_wasm2c.py')
++run('xcrun', 'clang', '-Wno-deprecated-declarations', '-c', 'Scripts/sha256_shim.c', '-o', 'Tools/sha256_shim.o')
++run('xcrun', 'clang++', '-std=c++20', '-O1', '-I', str(wabt / 'include'),
++    'Tools/wasm2c-main.cc', 'Tools/c-writer-patched.cc', 'Tools/sha256_shim.o',
++    str(wabt / 'lib/libwabt.a'), '-o', 'Tools/wasm2c-native')
++run('Tools/wasm2c-native', '--enable-threads', '--no-debug-names', '--module-name=game',
++    '--num-outputs=64', str(engine), '-o', 'Generated/game.c')
++# Function names from the engine's name section: the patchers below find their functions by name.
++run('python3', 'Scripts/engine_names.py', '--wasm', str(engine))
++runtime = wabt / 'share/wabt/wasm2c/wasm-rt-impl.c'
++text = runtime.read_text()
++if 'pg_record_trap' not in text:
++    text = text.replace('void wasm_rt_trap(wasm_rt_trap_t code) {',
++        'extern void pg_record_trap(int) __attribute__((weak));\nvoid wasm_rt_trap(wasm_rt_trap_t code) {\n  if(pg_record_trap)pg_record_trap(code);')
++    runtime.write_text(text)
++run('python3', 'Scripts/generate_imports.py')
++# Engine code with wasm2c's own access names while the patchers below match it (a prepared tree may be plain already).
++run('python3', 'Scripts/prepare_plain_engine.py', 'off')
++run('python3', 'Scripts/prepare_heap_diagnostics.py')
++run('python3', 'Scripts/prepare_memory_pressure.py')
++shutil.copyfile(options.mirror / 'data/manifest.json', root / 'Resources/manifest.json')
++run('python3', 'Scripts/prepare_virtual_pad.py')
++run('python3', 'Scripts/prepare_movie_wait.py')
++run('python3', 'Scripts/prepare_tv_without_video.py')
++run('python3', 'Scripts/prepare_bink_queue.py')
++run('python3', 'Scripts/prepare_menu_shadow.py')
++run('python3', 'Scripts/prepare_settings_restart.py')
++run('python3', 'Scripts/prepare_missing_text.py')
++run('python3', 'Scripts/prepare_help_label_check.py')
++run('python3', 'Scripts/prepare_clip_offsets.py')
++run('python3', 'Scripts/prepare_handler_frame.py')
++run('python3', 'Scripts/prepare_netlog_flush.py')
++run('python3', 'Scripts/prepare_input_exclusive.py')
++run('python3', 'Scripts/prepare_restore_flush.py')
++run('python3', 'Scripts/prepare_destroyed_phases.py')
++run('python3', 'Scripts/prepare_heap_sizes.py')
++run('python3', 'Scripts/prepare_dependency_guard.py')
++run('python3', 'Scripts/prepare_script_request_guard.py')
++run('python3', 'Scripts/prepare_missing_txd.py')
++run('python3', 'Scripts/prepare_missing_scaleform.py')
++run('python3', 'Scripts/prepare_mod_archives.py')
++run('python3', 'Scripts/prepare_asi_natives.py')
++run('python3', 'Scripts/prepare_asi_script_tick.py')
++run('python3', 'Scripts/prepare_unchecked_memory.py')
++run('python3', 'Scripts/prepare_trap_context.py')
++run('python3', 'Scripts/prepare_scenario_blockers.py')
++run('python3', 'Scripts/prepare_level_index.py')
++run('python3', 'Scripts/prepare_fixup_guard.py')
++run('python3', 'Scripts/prepare_format_strings.py')
++run('python3', 'Scripts/prepare_video_memory.py')
++run('python3', 'Scripts/prepare_plain_dsp.py')
++run('python3', 'Scripts/prepare_cash_stats.py')
++run('python3', 'Scripts/prepare_native_opus.py')
++run('python3', 'Scripts/prepare_native_inflate.py')
++run('python3', 'Scripts/prepare_render_list_guard.py')
++run('python3', 'Scripts/prepare_stored_vehicle_mods.py')
++run('python3', 'Scripts/prepare_hud_layout.py')
++run('python3', 'Scripts/prepare_stale_texture_slots.py')
++run('python3', 'Scripts/prepare_control_trace.py')
++run('python3', 'Scripts/prepare_pause_ready.py')
++run('python3', 'Scripts/prepare_streaming_health.py')
++run('python3', 'Scripts/prepare_evict_protect.py')
++run('python3', 'Scripts/prepare_mesh_release.py')
++run('python3', 'Scripts/prepare_txd_parent.py')
++run('python3', 'Scripts/prepare_stream_alloc_trace.py')
++run('python3', 'Scripts/prepare_request_trace.py')
++run('python3', 'Scripts/prepare_heap_return.py')
++run('python3', 'Scripts/prepare_user_music.py')
++run('python3', 'Scripts/prepare_no_debug_text.py')
++run('python3', 'Scripts/prepare_scaled_look.py')
++run('python3', 'Scripts/prepare_thread_tables.py')
++run('python3', 'Scripts/prepare_frame_limit_sleep.py')
++run('python3', 'Scripts/prepare_script_fault_abort.py')
++run('python3', 'Scripts/prepare_occlusion_late.py')
++run('python3', 'Scripts/prepare_d3d_storage_stats.py')
++run('python3', 'Scripts/prepare_d3d_lazy_copies.py')
++run('python3', 'Scripts/prepare_memory_file_create.py')
++run('python3', 'Scripts/prepare_longjmp.py')
++run('python3', 'Scripts/prepare_trap_guards.py')
++run('python3', 'Scripts/prepare_stale_cbuffers.py')
++# Plain memory accesses engine-wide (GTA-187/216): after every script that matches or inserts engine code, which
++# expects wasm2c's own access names.
++run('python3', 'Scripts/prepare_plain_engine.py')
++# Every engine function reads the memory's address once (GTA-216); after all scripts that write engine code.
++run('python3', 'Scripts/prepare_memory_base.py')
++run('python3', 'Scripts/prepare_shared_tables.py')  # last: it rewrites every call_indirect line (GTA-217)
++# The BC texture decoder header (MIT): phones without BC texture support get decoded textures.
++bcdec = root / 'Tools/bcdec'
++if not bcdec.exists():
++    commit = '80859ed3b7afb1c527a2a99d70c61457bea72d0c'
++    archive = root / 'Tools/bcdec.tar.gz'
++    download(f'https://codeload.github.com/iOrange/bcdec/tar.gz/{commit}', archive)
++    from safe_extract import extract
++    with tarfile.open(archive) as package:
++        extract(package, root / 'Tools')
++    (root / 'Tools' / f'bcdec-{commit}').rename(bcdec)
++# Exact compatible metallib and reflection read from the original v1.5.2 release.
++assert (root / 'GeneratedResources/shaders-iphoneos.metallib').is_file()
++assert (root / 'GeneratedResources/shader-reflection.jsonl').is_file()
++sdk_args = ['--sdk','iphoneos']
++run('python3', 'Scripts/build_opus.py', *sdk_args)
++run('python3', 'Scripts/build_blink.py', *sdk_args)
++
++print('Prepared the native boot project. Open PlayGTA5Native.xcodeproj in Xcode.')
