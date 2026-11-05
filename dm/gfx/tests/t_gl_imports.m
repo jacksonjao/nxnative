@@ -123,6 +123,37 @@ int main(int argc, char **argv) {
     assert(h_glClientWaitSync(out, 0, 0) == GL_ALREADY_SIGNALED);
     h_glWaitSync(out, 0, UINT64_MAX);
     h_glDeleteSync(out); assert(!h_glGetError());
+    if (getenv("DM_TEST_GL_NVNTEX")) {
+        dev_init_once();
+        assert(g_dev);
+        NVNtextureBuilder tb = {0};
+        NVNtexture tex = {0};
+        void (*defaults)(NVNtextureBuilder *) = nvn_lookup("nvnTextureBuilderSetDefaults");
+        void (*set_name)(NVNtextureBuilder *, uint32_t) = nvn_lookup("nvnTextureBuilderSetGLTextureName");
+        uint32_t (*get_name)(const NVNtextureBuilder *) = nvn_lookup("nvnTextureBuilderGetGLTextureName");
+        NVNboolean (*init_tex)(NVNtexture *, const NVNtextureBuilder *) = nvn_lookup("nvnTextureInitialize");
+        void (*fini_tex)(NVNtexture *) = nvn_lookup("nvnTextureFinalize");
+        int (*width)(const NVNtexture *) = nvn_lookup("nvnTextureGetWidth");
+        int (*height)(const NVNtexture *) = nvn_lookup("nvnTextureGetHeight");
+        defaults(&tb);
+        assert(!get_name(&tb));
+        set_name(&tb, 0xf123);
+        assert(!init_tex(&tex, &tb));  // undefined texture is never reported as an initialized NVN image
+        GLuint name = 0;
+        h_glGenTextures(1, &name);
+        h_glBindTexture(GL_TEXTURE_2D, name);
+        h_glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 32, 16);
+        set_name(&tb, name);
+        assert(get_name(&tb) == name);
+        assert(init_tex(&tex, &tb) && width(&tex) == 32 && height(&tex) == 16);
+        id<MTLTexture> image = tex_of(name)->tex;
+        assert(image && image.width == 32 && image.height == 16);
+        fini_tex(&tex);
+        assert(tex_of(name)->tex == image);
+        h_glDeleteTextures(1, &name);
+        defaults(&tb);
+        assert(!get_name(&tb));
+    }
     const char *missing = "glMissingFunctionForTest";
     assert(!hle_implements(missing));
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);

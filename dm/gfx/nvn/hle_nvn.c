@@ -327,6 +327,8 @@ NVN(nvnTextureBuilderSetDefaults, void, NVNtextureBuilder *b) {
     TB(b)->d.target = NVN_TEXTURE_TARGET_2D; TB(b)->d.width = TB(b)->d.height = TB(b)->d.depth = TB(b)->d.levels = 1;
 }
 NVN(nvnTextureBuilderSetDevice, void, NVNtextureBuilder *b, NVNdevice *d) { TB(b)->dev = d; }
+NVN(nvnTextureBuilderSetGLTextureName, void, NVNtextureBuilder *b, uint32_t name) { TB(b)->gl_name = name; }
+NVN(nvnTextureBuilderGetGLTextureName, uint32_t, const NVNtextureBuilder *b) { return ((const tex_builder_t *)b)->gl_name; }
 NVN(nvnTextureBuilderSetFlags, void, NVNtextureBuilder *b, int f) { TB(b)->d.flags = f; }
 NVN(nvnTextureBuilderSetTarget, void, NVNtextureBuilder *b, NVNtextureTarget t) { TB(b)->d.target = t; }
 NVN(nvnTextureBuilderSetWidth, void, NVNtextureBuilder *b, int v) { TB(b)->d.width = v; }
@@ -493,12 +495,30 @@ int nvn_flushed(const void *p, uint64_t n) {   // whether the CPU flushed any of
     pthread_mutex_unlock(&g_fl_mu);
     return r;
 }
+extern void *gl_host_texture_2d(uint32_t name, nvn_texdesc *desc) __attribute__((weak_import));
 NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b) {
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
+    nvn_texdesc gl_desc;
+    void *gl_tex = NULL;
+    if (s->gl_name) {
+        gl_tex = gl_host_texture_2d ? gl_host_texture_2d(s->gl_name, &gl_desc) : NULL;
+        if (!gl_tex) {
+            static _Atomic int warned;
+            if (!atomic_exchange(&warned, 1)) LOG("[RED] NVN cannot import GL texture %u (not a defined RGBA8 2D texture)", s->gl_name);
+            return 0;
+        }
+    }
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
     if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }
     memset(o, 0, sizeof *o);
+    if (gl_tex) {
+        o->magic = MAGIC('T', 'E', 'X', 0); o->d = gl_desc;
+        nvn_tex_layout(&o->d, &o->L);
+        o->serial = nvn_new_serial(); mtl_tex_init(o); mtl_tex_import_shared(o->serial, gl_tex);
+        OLOG("texture %p shares GL name %u (%ux%u)", (void *)t, s->gl_name, o->d.width, o->d.height);
+        return 1;
+    }
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
     nvn_tex_layout(&o->d, &o->L);

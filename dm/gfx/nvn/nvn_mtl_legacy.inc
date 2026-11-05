@@ -10034,6 +10034,10 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
 // Bridge used by the Vulkan/OpenGL front ends that are linked into the common
 // host. Z-A itself uses NVN, but the symbols remain part of the shared host.
 void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
+void mtl_tex_import_shared(uint64_t serial, void *tex) {
+    id<MTLTexture> t = (__bridge id<MTLTexture>)tex;
+    res_add(t); serial_put(serial, t);
+}
 uint64_t mtl_ext_tex(void *tex) {
     static _Atomic uint64_t n;
     id<MTLTexture> t = (__bridge id<MTLTexture>)tex;

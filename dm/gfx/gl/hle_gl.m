@@ -19,6 +19,8 @@
 // Environment: DM_GL_LOG=1 logs object creation; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/nvn_tex.h"
+#include <nvn.h>
 #include "../nvn/host_msl.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -600,6 +602,20 @@ static int tex_make(tex_t *t, int rt) {
     t->levels = lv; t->made = 1; t->smp_dirty = 1;
     OLOG("texture %ux%u %s, %d levels%s", t->w, t->h, m->name, lv, faces == 6 ? ", cube" : "");
     return 1;
+}
+// Borrow a defined 2D image for an NVN texture. The NVN serial table retains the same Metal object.
+void *gl_host_texture_2d(uint32_t name, nvn_texdesc *desc) {
+    tex_t *t = tex_of(name);
+    if (!t || t->target != GL_TEXTURE_2D || !tex_make(t, 1) || !t->tex) return NULL;
+    int format;
+    switch (t->tex.pixelFormat) {
+        case MTLPixelFormatRGBA8Unorm: format = NVN_FORMAT_RGBA8; break;
+        case MTLPixelFormatRGBA8Unorm_sRGB: format = NVN_FORMAT_RGBA8_SRGB; break;
+        default: return NULL;
+    }
+    *desc = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format,
+                          .width = t->w, .height = t->h, .depth = 1, .levels = t->levels};
+    return (__bridge void *)t->tex;
 }
 // Write one level's (or a part's) bytes into a made texture, in command order: a CPU write when no command buffer that may still read it is pending,
 // else a blit from transient memory (in this frame's command buffer, after ending its render pass, when this frame used it; in a command buffer of its own otherwise).
