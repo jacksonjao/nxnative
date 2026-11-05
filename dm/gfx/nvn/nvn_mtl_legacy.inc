@@ -2470,7 +2470,16 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         }
     }
     id have = tex_get(t->serial);
-    if (legacy_sparse_candidate(t)) return legacy_sparse_bc6h(t, have);
+    if (legacy_sparse_candidate(t)) {
+        // Retain the native format's established upload path if the device's
+        // sparse layout is incompatible. BC6H's dense substitute cannot fit.
+        id<MTLTexture> mt = legacy_sparse_terrain(t, have);
+        if (mt || t->d.format == 0x50) return mt;
+        if ([have conformsToProtocol:@protocol(MTLTexture)] && objc_getAssociatedObject(have, &ls_key)) {
+            tex_put(t->serial, nil);
+            have = nil;
+        }
+    }
     if (!have && !packaged && sampled && on_sub_thread() && dm_sdk_ounce() && t->mem && t->pool &&
         t->d.samples <= 1 && t->d.target != NVN_TEXTURE_TARGET_BUFFER && !fmt_compressed(t->d.format) &&
         !(t->d.format >= NVN_FORMAT_STENCIL8 && t->d.format <= NVN_FORMAT_DEPTH32F_STENCIL8) &&

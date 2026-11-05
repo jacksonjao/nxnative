@@ -56,7 +56,7 @@ static int no_bc(void) { return 1; }
 static int on_sub_thread(void) { return 1; }
 static void res_add(id<MTLTexture> t) { assert(t.isSparse); }
 static void tex_put(uint64_t serial, id<MTLTexture> t) { assert(serial && t.isSparse); }
-static void tex_tag_format(id<MTLTexture> t, int format) { assert(t.isSparse && format == 0x50); }
+static void tex_tag_format(id<MTLTexture> t, int format) { assert(t.isSparse && (format == 0x50 || format == NVN_FORMAT_RGBX16SN)); }
 #define MLOG(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define RED_ONCE(tag, ...) MLOG(__VA_ARGS__)
 #include "../../nvn/nvn_legacy_sparse.inc"
@@ -69,8 +69,12 @@ static void verify_region(id<MTLTexture> mt, NSUInteger level, MTLRegion region,
     uint8_t *expected = calloc(1, bytes);
     id<MTLBuffer> result = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
     assert(blocks && expected && result);
-    assert(!nvn_deswizzle(guest, guest_level, 0, raw, blocks, src_row));
-    assert(!nvn_bc_decode(guest->format, blocks, src_row, w, h, expected, row));
+    if (guest->format == NVN_FORMAT_RGBX16SN)
+        assert(!nvn_deswizzle(guest, guest_level, 0, raw, expected, row));
+    else {
+        assert(!nvn_deswizzle(guest, guest_level, 0, raw, blocks, src_row));
+        assert(!nvn_bc_decode(guest->format, blocks, src_row, w, h, expected, row));
+    }
     id<MTLCommandBuffer> cb = [g_q commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:mt sourceSlice:67 sourceLevel:level sourceOrigin:region.origin
@@ -102,7 +106,7 @@ int main(void) { @autoreleasepool {
         table[i].mapped = true;
         memset(table[i].data, 0x21, LS_PAGE);
     }
-    id<MTLTexture> mt = legacy_sparse_bc6h(&t, nil);
+    id<MTLTexture> mt = legacy_sparse_terrain(&t, nil);
     assert(mt.isSparse);
     NvLegacySparse *state = objc_getAssociatedObject(mt, &ls_key);
     nvn_texdesc page = {.target = 1, .format = 0x50, .width = 256, .height = 256, .depth = 1, .levels = 1, .pkg_block_h = 4};
@@ -119,13 +123,13 @@ int main(void) { @autoreleasepool {
 
     memset(table[0].data + 1, 0x41, LS_PAGE - 1);
     table[0].stamp = ++dirty;
-    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    assert(legacy_sparse_terrain(&t, mt) == mt);
     verify_region(mt, 0, region, &page, 0, table[0].data);
     assert(state->heap.usedSize == resident);
 
     table[0].gen = ++generation;
     table[0].mapped = false;
-    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    assert(legacy_sparse_terrain(&t, mt) == mt);
     id<MTLCommandBuffer> fence = [g_q commandBuffer];
     [fence commit]; [fence waitUntilCompleted];
     assert(state->heap.usedSize < resident && !atomic_load(&state->failed));
@@ -133,15 +137,54 @@ int main(void) { @autoreleasepool {
     state->budget = state->resident * g_dev.sparseTileSizeInBytes;
     table[0].gen = ++generation;
     table[0].mapped = true;
-    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    assert(legacy_sparse_terrain(&t, mt) == mt);
     assert(state->trimmed && !atomic_load(&state->failed));
     assert(state->heap.usedSize < resident);
     state->budget = LS_HEAP;
     state->revisit = true; // Simulate a budget freed by another page.
     memset(table[0].data, 0x57, LS_PAGE);
-    assert(legacy_sparse_bc6h(&t, mt) == mt);
+    assert(legacy_sparse_terrain(&t, mt) == mt);
     verify_region(mt, 0, region, &page, 0, table[0].data);
     assert(state->heap.usedSize == resident && !atomic_load(&state->failed));
     puts("Legacy sparse BC6H: initial tile and all tail mips, dirty rewrite, budget exhaustion, unmap and remap verified.");
+
+    t.d.format = NVN_FORMAT_RGBX16SN;
+    t.serial = 2;
+    nvn_tex_layout(&t.d, &t.L);
+    uint32_t tw, th, td;
+    tail = nvn_tex_sparse_tiles(&t.d, &tw, &th, &td);
+    assert(tw * th * 8 == LS_PAGE && td == 1);
+    tail_off = nvn_tex_level_offset(&t.d, tail);
+    last_slice = (uint64_t)t.mem + 67 * t.L.layer_size;
+    table[0].at = last_slice + ((8192 / tw) * (8192 / th) - 1) * LS_PAGE;
+    table[1].at = last_slice + tail_off;
+    for (unsigned i = 0; i < 2; i++) {
+        table[i].gen = ++generation;
+        for (unsigned j = 0; j < LS_PAGE; j++) table[i].data[j] = j ^ (j >> 9) ^ i;
+    }
+    assert(legacy_sparse_candidate(&t));
+    mt = legacy_sparse_terrain(&t, nil);
+    assert(mt.isSparse && mt.pixelFormat == MTLPixelFormatRGBA16Snorm);
+    state = objc_getAssociatedObject(mt, &ls_key);
+    unsigned tile_h, tile_d;
+    nvn_tex_level_tiles(&t.d, 0, &tile_h, &tile_d);
+    page = (nvn_texdesc){.target = 1, .format = t.d.format, .width = tw, .height = th,
+                         .depth = 1, .levels = 1, .pkg_block_h = tile_h + 1};
+    region = MTLRegionMake2D(8192 - tw, 8192 - th, tw, th);
+    verify_region(mt, 0, region, &page, 0, table[0].data);
+    resident = state->heap.usedSize;
+    assert(resident && resident < (1 << 20) && !atomic_load(&state->failed));
+    layer = mmap(NULL, t.L.layer_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(layer != MAP_FAILED);
+    memcpy(layer + tail_off, table[1].data, LS_PAGE);
+    for (unsigned l = tail; l < t.d.levels; l++)
+        verify_region(mt, l, MTLRegionMake2D(0, 0, 8192 >> l, 8192 >> l), &t.d, l, layer);
+    assert(!munmap(layer, t.L.layer_size));
+    table[0].data[15] ^= 0xa5;
+    table[0].stamp = ++dirty;
+    assert(legacy_sparse_terrain(&t, mt) == mt);
+    verify_region(mt, 0, region, &page, 0, table[0].data);
+    assert(state->heap.usedSize == resident);
+    puts("Legacy sparse RGBX16SN: native tile and mip tail GPU readback, bounded residency and dirty rewrite verified.");
     return 0;
 } }

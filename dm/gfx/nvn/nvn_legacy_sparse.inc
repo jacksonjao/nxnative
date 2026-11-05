@@ -1,5 +1,5 @@
-// The Switch 2 terrain cache's unsigned BC6H array cannot be allocated
-// densely on devices that unpack BC6H. A guest 64 KiB page is copied into
+// The Switch 2 terrain caches include unsigned BC6H (decoded on older
+// GPUs) and native RGBX16SN. A mapped guest 64 KiB page is copied into
 // private sparse Metal tiles; GPU-written data stays in those tiles until
 // the guest changes the backing mapping or writes the backing CPU pages.
 enum { LS_PAGE = 65536, LS_BATCH = 8 << 20, LS_HEAP = 384 << 20, LS_DETAIL = 160 << 20 };
@@ -39,12 +39,13 @@ typedef struct {
 } ls_batch;
 
 static int legacy_sparse_candidate(const tex_t *t) {
-    return t && t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY && t->d.format == 0x50 &&
+    return t && t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY &&
+        ((t->d.format == 0x50 && no_bc()) || t->d.format == NVN_FORMAT_RGBX16SN) &&
         t->d.width == 8192 && t->d.height == 8192 && t->d.depth == 68 && t->d.levels == 12 &&
         (t->d.flags & NVN_TEXTURE_FLAGS_SPARSE) &&
         !(t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE |
                         NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) &&
-        t->d.samples <= 1 && t->mem && t->pool && no_bc() && nvn_sparse_pool(t->pool);
+        t->d.samples <= 1 && t->mem && t->pool && nvn_sparse_pool(t->pool);
 }
 
 // Queue uploads before the replay CB is committed, as for packaged textures.
@@ -86,7 +87,7 @@ static bool ls_flush(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacyS
     [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.error && !atomic_exchange(&state->failed, true)) {
             g_ser_gen++;
-            MLOG("Legacy sparse BC6H command failed: %s", done.error.localizedDescription.UTF8String);
+            MLOG("Legacy sparse terrain command failed: %s", done.error.localizedDescription.UTF8String);
         }
         dispatch_semaphore_signal(inflight);
     }];
@@ -107,10 +108,14 @@ static bool ls_stage(ls_batch *batch, id<MTLTexture> mt, MTLSize tile, NvLegacyS
     if (raw) {
         if (!batch->data) batch->data = [g_dev newBufferWithLength:LS_BATCH options:MTLResourceStorageModeShared];
         if (!batch->data) return false;
-        size_t block_row = ((w + 3) / 4) * 16;
-        if (nvn_deswizzle(src, src_level, 0, raw, blocks, block_row) ||
-            nvn_bc_decode(src->format, blocks, block_row, w, h,
-                          (uint8_t *)batch->data.contents + batch->bytes, row)) return false;
+        uint8_t *dst = (uint8_t *)batch->data.contents + batch->bytes;
+        if (src->format == NVN_FORMAT_RGBX16SN) {
+            if (nvn_deswizzle(src, src_level, 0, raw, dst, row)) return false;
+        } else {
+            size_t block_row = ((w + 3) / 4) * 16;
+            if (nvn_deswizzle(src, src_level, 0, raw, blocks, block_row) ||
+                nvn_bc_decode(src->format, blocks, block_row, w, h, dst, row)) return false;
+        }
     }
     op.offset = batch->bytes;
     op.row = row;
@@ -145,9 +150,9 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
     uint32_t tw, th, td;
     int tail = nvn_tex_sparse_tiles(&t->d, &tw, &th, &td);
     unsigned mt_tail = (unsigned)mt.firstMipmapInTail;
-    if (tail != 6 || tw != 256 || th != 256 || td != 1 || !tile.width || !tile.height ||
+    if (tail <= 0 || (unsigned)tail >= t->d.levels || !tw || !th || td != 1 || !tile.width || !tile.height ||
         tw % tile.width || th % tile.height || mt_tail < (unsigned)tail) {
-        MLOG("Legacy sparse BC6H incompatible tile layout: guest %ux%ux%u tail=%d; Metal %lux%lux%lu tail=%u/%lu tile=%lu B",
+        MLOG("Legacy sparse terrain incompatible tile layout: guest %ux%ux%u tail=%d; Metal %lux%lux%lu tail=%u/%lu tile=%lu B",
              tw, th, td, tail, (unsigned long)tile.width, (unsigned long)tile.height, (unsigned long)tile.depth,
              mt_tail, (unsigned long)mt.mipmapLevelCount, (unsigned long)g_dev.sparseTileSizeInBytes);
         return false;
@@ -160,8 +165,8 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
     nvn_texlayout pl;
     nvn_tex_layout(&page, &pl);
     size_t tail_off = nvn_tex_level_offset(&t->d, (unsigned)tail), layer = t->L.layer_size;
-    if (bd || pl.size != LS_PAGE || layer < tail_off || layer - tail_off != LS_PAGE) {
-        MLOG("Legacy sparse BC6H invalid guest pages: blockDepth=%u page=%zu layer=%zu tailOffset=%zu",
+    if (bd || pl.size != LS_PAGE || tail_off % LS_PAGE || layer < tail_off || layer - tail_off != LS_PAGE) {
+        MLOG("Legacy sparse terrain invalid guest pages: blockDepth=%u page=%zu layer=%zu tailOffset=%zu",
              bd, (size_t)pl.size, layer, tail_off);
         return false;
     }
@@ -226,13 +231,13 @@ static bool ls_refresh(const tex_t *t, id<MTLTexture> mt, NvLegacySparse *s, MTL
     if (ok) ok = ls_flush(&batch, mt, tile, s);
     if (ok) {
         if (trimmed && !s->trimmed)
-            MLOG("Legacy sparse BC6H budget reached: keep %u mapped tiles, leave excess pages unmapped", s->resident);
+            MLOG("Legacy sparse terrain budget reached: keep %u mapped tiles, leave excess pages unmapped", s->resident);
         s->trimmed = trimmed; s->revisit = trimmed && freed; s->gen = gen; s->stamp = stamp; s->initialized = YES;
     }
     return ok;
 }
 
-static id<MTLTexture> legacy_sparse_bc6h(const tex_t *t, id<MTLTexture> existing) {
+static id<MTLTexture> legacy_sparse_terrain(const tex_t *t, id<MTLTexture> existing) {
     id<MTLTexture> mt = existing;
     // Replay owns both the page bookkeeping and command ordering.
     if (!on_sub_thread()) return mt;
@@ -248,13 +253,13 @@ static id<MTLTexture> legacy_sparse_bc6h(const tex_t *t, id<MTLTexture> existing
         s->heap = [g_dev newHeapWithDescriptor:heap];
         MTLTextureDescriptor *d = [MTLTextureDescriptor new];
         d.textureType = MTLTextureType2DArray;
-        d.pixelFormat = MTLPixelFormatRGBA16Float;
+        d.pixelFormat = t->d.format == NVN_FORMAT_RGBX16SN ? MTLPixelFormatRGBA16Snorm : MTLPixelFormatRGBA16Float;
         d.width = t->d.width; d.height = t->d.height;
         d.arrayLength = t->d.depth; d.mipmapLevelCount = t->d.levels;
         d.storageMode = MTLStorageModePrivate;
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
         mt = [s->heap newTextureWithDescriptor:d];
-        if (!mt.isSparse) { RED_ONCE(2, "Legacy sparse BC6H array allocation failed"); return nil; }
+        if (!mt.isSparse) { RED_ONCE(2, "Legacy sparse terrain array allocation failed"); return nil; }
         objc_setAssociatedObject(mt, &ls_key, s, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (!s || atomic_load(&s->failed)) return nil;
@@ -267,13 +272,13 @@ static id<MTLTexture> legacy_sparse_bc6h(const tex_t *t, id<MTLTexture> existing
     if (!ls_refresh(t, mt, s, tile)) {
         if (!atomic_exchange(&s->failed, true)) {
             g_ser_gen++;
-            MLOG("Legacy sparse BC6H refresh stopped: resident=%u tile=%lu B, Metal tile=%lux%lu tail=%lu; layer=%zu",
+            MLOG("Legacy sparse terrain refresh stopped: resident=%u tile=%lu B, Metal tile=%lux%lu tail=%lu; layer=%zu",
                  s->resident, (unsigned long)g_dev.sparseTileSizeInBytes, (unsigned long)tile.width,
                  (unsigned long)tile.height, (unsigned long)mt.firstMipmapInTail, (size_t)t->L.layer_size);
         }
         return nil;
     }
     if (fresh)
-        MLOG("Legacy sparse BC6H array %ux%u x%u initialized (%u resident Metal tiles)", t->d.width, t->d.height, t->d.depth, s->resident);
+        MLOG("Legacy sparse terrain array format=%#x %ux%u x%u initialized (%u resident Metal tiles)", t->d.format, t->d.width, t->d.height, t->d.depth, s->resident);
     return mt;
 }
