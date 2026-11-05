@@ -2944,7 +2944,24 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
     alias_key original_key = ak;
     MTLPixelFormat alias_format = nvn2_rgba8_alias(&ak);
-    pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
+    pthread_mutex_lock(&g_smu);
+    __unsafe_unretained id shared = hm_get_id(&g_alias, &ak);
+    // An upload object can include more mip levels than the sampling object at the same GPU address
+    // (NARUTO STORM 4 uploads BGR565 through a two-level object, then samples its level zero).
+    // Reuse an existing compatible backing for a plain 2D, single-level prefix. No layer pitch,
+    // sparse mip tail or layout flag can shift the common level. Sampling still sees one level.
+    if (!shared && ak.pool && t->mem && !t->has_layout && !t->d.pkg_block_h &&
+        (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) &&
+        t->d.target == NVN_TEXTURE_TARGET_2D && !t->d.flags && t->d.samples <= 1 && t->d.levels == 1) {
+        alias_key prefix = ak;
+        for (uint32_t extent = MAX(t->d.width, t->d.height) >> 1; extent; extent >>= 1) {
+            prefix.d.levels++;
+            shared = hm_get_id(&g_alias, &prefix);
+            if (shared) { ak = prefix; break; }
+        }
+    }
+    if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1));
+    pthread_mutex_unlock(&g_smu);
     if (shared && alias_format != MTLPixelFormatInvalid && ((id<MTLTexture>)shared).pixelFormat != alias_format) {
         id<MTLTexture> view = [(id<MTLTexture>)shared newTextureViewWithPixelFormat:alias_format];
         if (view) { res_add(view); tex_put(t->serial, view); return view; }
@@ -4691,7 +4708,8 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     int stv = want_st && base.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     if (want_st && !stv)
         RED_ONCE(104, "stencil-mode texture view of Metal format %lu (texture ID %d): no stencil-only view, depth is read", (unsigned long)base.pixelFormat, tid);
-    if ((r.has_v && (r.v.set_format || r.v.set_levels || r.v.set_layers || r.v.set_target)) || need_sw || stv) {
+    const int mip_prefix = r.t.d.levels == 1 && base.mipmapLevelCount > 1 && !base.parentTexture;
+    if ((r.has_v && (r.v.set_format || r.v.set_levels || r.v.set_layers || r.v.set_target)) || need_sw || stv || mip_prefix) {
         if (!r.has_v) memset(&r.v, 0, sizeof r.v);
         uint32_t pf = (uint32_t)base.pixelFormat; uint8_t swz[4];
         if (r.v.set_format && !(nvn_fmt_to_mtl(r.v.format, &pf, swz) && pf)) pf = (uint32_t)base.pixelFormat;
@@ -4704,11 +4722,13 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             base = tex_upgrade_pfv(&rp->t, base, (MTLPixelFormat)pf);
             sg = g_ser_gen;
         }
-        NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : base.mipmapLevelCount - l0;
-        if (l0 >= base.mipmapLevelCount) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)base.mipmapLevelCount); return nil; }
+        NSUInteger visible_levels = mip_prefix ? 1 : base.mipmapLevelCount;
+        NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0;
+        if (l0 >= visible_levels) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)visible_levels); return nil; }
+        NSUInteger nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : visible_levels - l0;
         // A level count past the texture's levels is cut to those it has, as deko3d's Tegra descriptor writer clips the maximum level (Echoes of Wisdom: levels 1 + 7 of a seven-level texture,
         // which Metal's validation refuses)
-        if (nl > base.mipmapLevelCount - l0) nl = base.mipmapLevelCount - l0;
+        if (nl > visible_levels - l0) nl = visible_levels - l0;
         NSUInteger s0 = r.v.set_layers ? r.v.min_layer : 0;
         NSUInteger ns = base.textureType == MTLTextureType3D ? 1 : (r.v.set_layers && r.v.nlayers ? r.v.nlayers : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1) - s0);
         MTLTextureType tt = r.v.set_target ? ttype(r.v.target, base.textureType) : base.textureType;

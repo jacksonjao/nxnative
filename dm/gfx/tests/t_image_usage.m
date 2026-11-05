@@ -75,8 +75,44 @@ static void image_case(int explicit_image) { @autoreleasepool {
     read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }
+// A base-only descriptor in a CPU-inaccessible pool must see the GPU writes
+// made through the larger mip chain without exposing the additional levels.
+static void mip_prefix_case(void) { @autoreleasepool {
+    static uint8_t storage[4096];
+    pool_t pool = {.mem=storage, .size=sizeof storage, .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS};
+    tex_t upload = {.magic=MAGIC('T','E','X',0), .serial=99601, .mem=storage, .pool=&pool};
+    upload.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_R16F,
+                            .width=8, .height=8, .depth=1, .levels=2, .samples=1};
+    nvn_tex_layout(&upload.d, &upload.L); mtl_tex_init(&upload);
+    tex_t base_only = upload; base_only.serial++; base_only.d.levels = 1;
+    nvn_tex_layout(&base_only.d, &base_only.L); mtl_tex_init(&base_only);
+    tex_t other = base_only; other.serial++; other.off = 2048; other.mem += other.off;
+    mtl_tex_init(&other);
+    id<MTLTexture> full = tex_mtl(&upload);
+    CHECK(full && full.mipmapLevelCount == 2, "upload keeps both mips");
+    if (!full) return;
+    id<MTLCommandBuffer> seed = q_cb(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = full; rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = MTLClearColorMake(0.5,0,0,1);
+    [[seed renderCommandEncoderWithDescriptor:rp] endEncoding]; [seed commit]; [seed waitUntilCompleted];
+    CHECK(seed.status == MTLCommandBufferStatusCompleted, "base level seeded on GPU");
+    mtl_reg_tex(603, &base_only, NULL);
+    mtl_reg_tex(604, &other, NULL);
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> visible = tex_by_id(603), independent = tex_by_id(604);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(visible && visible.parentTexture == full && visible.mipmapLevelCount == 1, "descriptor restricts the shared backing to one mip");
+    CHECK(independent && independent != full && independent.parentTexture != full, "different offset does not alias the upload");
+    if (visible) {
+        uint16_t pixels[64]; read_level(visible, 0, pixels);
+        int same = 1; for (int i = 0; i < 64; i++) same &= pixels[i] == 0x3800;
+        CHECK(same, "single-mip sampler sees the GPU-written pixels");
+    }
+    mtl_tex_release(&other); mtl_tex_release(&base_only); mtl_tex_release(&upload);
+    mtl_alias_drop_pool(&pool);
+} }
 int main(void) { @autoreleasepool {
-    mtl_init(); image_case(0); image_case(1);
-    printf("explicit image usage: %d checks, %d failed\n", checks, failed);
+    mtl_init(); image_case(0); image_case(1); mip_prefix_case();
+    printf("image usage and sampled aliases: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

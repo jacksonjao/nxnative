@@ -111,6 +111,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** `mtl_pool_del`, `res_add_at` and `res_remove` (`nvn_mtl.m`) each have their own `@autoreleasepool`, as `defer_drain` and the memory line's count already did ([Deferred-release drain without an autorelease pool](memory.md#deferred-release-drain-without-an-autorelease-pool)).
 - **Found on:** [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md): 0 buffers freed but alive with the fix; GPU allocated 1.7 GB instead of 8.3 GB 300 frames into the boot and 2.9 GB instead of 9.9 to 11.7 GB in Chapter 1, resident memory, frame times and pictures unchanged (zero-copy buffers add no memory of their own). [Pokémon Sword](../../dm/games/0100ABF008968000/README.md): 8 to 0 at the title after 90 s. Earlier Mac logs show the count in most games, growing with play: Animal Crossing: New Horizons 3,113 after 27,900 frames, Pokémon Sword 2,050, Super Smash Bros. Ultimate 1,279, Pokémon Legends: Z-A 932 (small pools there: 100 to 300 MB).
 
+### Single-mip descriptors over an existing mip chain
+
+- **Symptom:** character silhouettes and eyes render black even though geometry and depth are present.
+- **Cause:** the game uploads into a two-level block-linear texture and samples level zero through a one-level texture at the same pool offset. The host keyed Metal storage by the full texture description, so the sampling object got a separate, zero-filled backing.
+- **Fix:** reuse the existing backing for a plain, single-level 2D prefix in a non-virtual, CPU-inaccessible pool; the descriptions must agree apart from the level count. Restrict the sampling view to the guest's single level. CPU-owned storage, special layouts, layered textures and sparse pools keep their own paths.
+- **Found on:** NARUTO SHIPPUDEN: Ultimate Ninja STORM 4 ROAD TO BORUTO 1.1.0. The sampled 512×512 BGR565 texture and the title character both regain color in a matched Mac frame.
+- **Check:** `t_image_usage` reads the GPU-written pixels through the single-level descriptor and confirms another pool offset stays independent.
+
 ### Finalized textures kept by registered descriptor views
 
 - **Symptom:** GPU and resident memory keep growing during texture streaming while pool, residency and serial-object counts stay nearly flat, with no freed pool buffers alive.
