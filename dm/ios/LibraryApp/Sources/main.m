@@ -53,6 +53,10 @@ void TonTonApplyGlobalSettings(NSString *titleID){
         if(!choice.length)choice=spec[@"default"];
         if(!choice.length||[choice isEqual:@"auto"])continue;
         if([key isEqual:@"DM_FRAME_LIMIT"]){
+            // Keep an explicit game pacing profile over the library default.
+            // A saved setting for this title still wins below.
+            const char *profile=getenv("DM_FRAME_LIMIT");
+            if(profile && !strcmp(profile,"game"))continue;
             if([choice isEqual:@"unlimited"]||[choice isEqual:@"game"])setenv(key.UTF8String,choice.UTF8String,1);
             continue;
         }

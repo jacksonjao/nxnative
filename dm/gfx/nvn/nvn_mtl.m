@@ -4895,7 +4895,11 @@ static NvArena *arena_new(size_t minimum, BOOL geometry, BOOL compact) {
     if (r) { [g_arenas removeObject:r]; r->fence = 0; r->used = 0; return r; }
     NvArena *a = [NvArena new];
     // On recovery a tiny argument must not require allocating a fresh 4 MiB.
-    const size_t length = MAX(minimum, compact ? (size_t)getpagesize() : 4u << 20);
+    size_t length = MAX(minimum, compact ? (size_t)getpagesize() : 4u << 20);
+    // Nearby geometry draw sizes can reuse the same completed buffer. Keep
+    // the existing cache budget and use exact sizes when memory is tight.
+    const size_t bucket = 2u << 20;
+    if (geometry && !compact && length <= (48u << 20)) length = (length + bucket - 1) & ~(bucket - 1);
     a->buf = [g_dev newBufferWithLength:length options:MTLResourceStorageModeShared];
     if (!a->buf) return nil;
     a->geometry = geometry;
@@ -4937,15 +4941,21 @@ static size_t arena_try_alloc(size_t n, __strong id<MTLBuffer> *buf, BOOL captur
         if (!next) {
             // Never wait for the current submission (it has not been queued).
             // A preceding fence and its deferred resources can be reclaimed.
-            if (g_arena_recovery_submission != g_sub_serial) {
+            const BOOL first = g_arena_recovery_submission != g_sub_serial;
+            if (first) {
                 g_arena_recovery_submission = g_sub_serial;
                 uint64_t fence = g_fence;
                 if (fence > g_done && on_sub_thread()) mtl_wait_at(fence, 20 * 1000000ull, WS_ALLOC);
                 defer_drain();
             }
-            arena_trim(g_done, 0, geometry);
-            res_commit();
-            pthread_mutex_lock(&g_mu); next = arena_new(n, geometry, YES); pthread_mutex_unlock(&g_mu);
+            size_t released = arena_trim(g_done, 0, geometry);
+            if (first || released) res_commit();
+            // A compact allocation can be smaller even if nothing was freed.
+            // Otherwise leave an identical failed request to the caller's
+            // split path instead of immediately asking Metal a second time.
+            if (first || released || n < (4u << 20) || (geometry && n <= (48u << 20) && (n & ((2u << 20) - 1)))) {
+                pthread_mutex_lock(&g_mu); next = arena_new(n, geometry, YES); pthread_mutex_unlock(&g_mu);
+            }
         }
         if (!next) { *buf = nil; return SIZE_MAX; }
         *current = next;
