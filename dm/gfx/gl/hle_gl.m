@@ -156,7 +156,8 @@ static int is_samp(int t) { return t >= T_SAMP2D && t < T_OTHER; }
 static int is_intt(int t) { return t >= T_INT && t <= T_BOOL; }
 typedef struct { char name[48]; uint8_t slot, type; } shattr;                         // a vertex input
 typedef struct { char name[48]; uint16_t off, count, stride; uint8_t type; } shuni;   // a default block member (count 0 = not an array)
-typedef struct { char name[48]; uint8_t slot, type; } shsamp;                         // a combined sampler: texture and sampler slot
+enum { GL_SAMPLER_ARRAY_MAX = 16 };
+typedef struct { char name[48]; uint8_t slot, type, elem, count; } shsamp;                         // a combined sampler: texture and sampler slot
 typedef struct { char key[17]; int frag, ub_slot, ub_size, na, nu, nt; shattr *a; shuni *u; shsamp *t; } shinfo;
 static shinfo *g_sh; static int g_nsh;
 static int sh_cmp(const void *a, const void *b) { int c = memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); return c ? c : ((const shinfo *)a)->frag - ((const shinfo *)b)->frag; }
@@ -182,7 +183,14 @@ static void sh_load(void) {
             if (t[0] == 'a' && sscanf(t, "a:%63[^=]=%u:%31s", nm, &a1, ty) == 3 && a1 < 16) { shattr *x = &s->a[s->na++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty); }
             else if (t[0] == 'u' && sscanf(t, "u:%63[^=]=%u:%31[^:]:%u:%u", nm, &a1, ty, &a2, &a3) == 5) {
                 shuni *x = &s->u[s->nu++]; strlcpy(x->name, nm, sizeof x->name); x->off = a1; x->type = tcode(ty); x->count = a2; x->stride = a3;
-            } else if (t[0] == 't' && sscanf(t, "t:%63[^=]=%u:%31s", nm, &a1, ty) == 3) { shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty); }
+            } else if (t[0] == 't') {
+                unsigned elem = 0, count = 0;
+                int fields = sscanf(t, "t:%63[^=]=%u:%31[^:]:%u:%u", nm, &a1, ty, &elem, &count);
+                if ((fields == 3 || (fields == 5 && elem < count && count <= GL_SAMPLER_ARRAY_MAX)) && a1 < 128) {
+                    shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name);
+                    x->slot = a1; x->type = tcode(ty); x->elem = elem; x->count = count;
+                }
+            }
             else if (t[0] == 'b' && sscanf(t, "b:%u:%u", &a1, &a2) == 2) { s->ub_slot = a1; s->ub_size = a2; }
         }
         if (s->ub_slot >= 15) GLOG("[RED] shader %s: uniform block at buffer slot %d meets the vertex buffer slots", s->key, s->ub_slot);
@@ -321,7 +329,7 @@ NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
 typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled; } shader_t;
-typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
+typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int16_t slot[2][GL_SAMPLER_ARRAY_MAX]; GLint unit[GL_SAMPLER_ARRAY_MAX]; } puni_t;   // [0] vertex, [1] fragment
 typedef struct { uint32_t vf[16]; uint16_t stride[16]; uint8_t div[16]; uint32_t cpf, dpf, spf; uint8_t blend, mask, bsrc, bdst, bsa, bda, eqc, eqa; } pkey_t;
 typedef struct { pkey_t k; void *pso; } pent_t;   // pso: a retained id<MTLRenderPipelineState>, NULL = failed
 // amap: the game's attribute index of each Metal vertex input (glBindAttribLocation before the link, else the input's own number, which glGetAttribLocation returns);
@@ -900,22 +908,25 @@ static void bind_uniforms_textures(prog_t *p) {
     for (int i = 0; i < p->nu; i++) {
         puni_t *u = &p->u[i];
         if (!is_samp(u->type)) continue;
-        int unit = u->unit < 0 || u->unit >= NUNITS ? 0 : u->unit;
-        GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D : u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
-        tex_t *t = tex_of(*unit_slot(unit, target));
-        id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
-        if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t); t->use = g_serial; }
-        if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 : u->type == T_SAMP2DARR ? g_arr0 : g_tex0;
-        static int dl = -1; if (dl < 0) dl = getenv("DM_GL_DRAWLOG") != NULL;
-        if (dl && tx == g_tex0 && t == NULL) {   // a sampler with no texture: the layer draws the 1x1 black placeholder
-            static uint32_t seen_p[64]; static int seen_u[64], nseen;
-            int dup = 0; for (int k = 0; k < nseen; k++) if (seen_p[k] == p->serial && seen_u[k] == unit) dup = 1;
-            if (!dup && nseen < 64) { seen_p[nseen] = p->serial; seen_u[nseen++] = unit;
-                GLOG("program %u sampler %s (unit %d) has no texture: drawing the 1x1 black placeholder", p->serial, u->name, unit); } }
-        for (int st = 0; st < 2; st++) {
-            if (u->slot[st] < 0) continue;
-            if (st) { [e setFragmentTexture:tx atIndex:u->slot[st]]; [e setFragmentSamplerState:sm atIndex:u->slot[st]]; }
-            else { [e setVertexTexture:tx atIndex:u->slot[st]]; [e setVertexSamplerState:sm atIndex:u->slot[st]]; }
+        for (int elem = 0; elem < (u->count ? u->count : 1); elem++) {
+            if (u->slot[0][elem] < 0 && u->slot[1][elem] < 0) continue;
+            int unit = u->unit[elem] < 0 || u->unit[elem] >= NUNITS ? 0 : u->unit[elem];
+            GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D : u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+            tex_t *t = tex_of(*unit_slot(unit, target));
+            id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
+            if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t); t->use = g_serial; }
+            if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 : u->type == T_SAMP2DARR ? g_arr0 : g_tex0;
+            static int dl = -1; if (dl < 0) dl = getenv("DM_GL_DRAWLOG") != NULL;
+            if (dl && tx == g_tex0 && t == NULL) {   // a sampler with no texture: the layer draws the 1x1 black placeholder
+                static uint32_t seen_p[64]; static int seen_u[64], nseen;
+                int dup = 0; for (int k = 0; k < nseen; k++) if (seen_p[k] == p->serial && seen_u[k] == unit) dup = 1;
+                if (!dup && nseen < 64) { seen_p[nseen] = p->serial; seen_u[nseen++] = unit;
+                    GLOG("program %u sampler %s (unit %d) has no texture: drawing the 1x1 black placeholder", p->serial, u->name, unit); } }
+            for (int st = 0; st < 2; st++) {
+                if (u->slot[st][elem] < 0) continue;
+                if (st) { [e setFragmentTexture:tx atIndex:u->slot[st][elem]]; [e setFragmentSamplerState:sm atIndex:u->slot[st][elem]]; }
+                else { [e setVertexTexture:tx atIndex:u->slot[st][elem]]; [e setVertexSamplerState:sm atIndex:u->slot[st][elem]]; }
+            }
         }
     }
     E.prog = p->serial;
@@ -1866,9 +1877,9 @@ GLB(glLinkProgram, void, GLuint pr) {
             const char *nm = i < si->nu ? si->u[i].name : si->t[i - si->nu].name;
             puni_t *u = NULL;
             for (int j = 0; j < p->nu; j++) if (!strcmp(p->u[j].name, nm)) u = &p->u[j];
-            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; }
+            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; memset(u->slot, -1, sizeof u->slot); }
             if (i < si->nu) { const shuni *m = &si->u[i]; u->type = m->type; u->count = m->count; u->off[st] = m->off; u->stride[st] = m->stride; }
-            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; }
+            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->count = m->count; u->slot[st][m->elem] = m->slot; }
         }
     }
     // the game's attribute indices: glBindAttribLocation's for the inputs it names, the input's own number for the others (or the lowest index no binding took)
@@ -1945,7 +1956,14 @@ static void uni_write(GLint loc, GLsizei count, const void *v, int comps, int is
     int i = loc / 4096, el = loc % 4096;
     if (i >= p->nu) return;
     puni_t *u = &p->u[i];
-    if (is_samp(u->type)) { if (is_int) u->unit = *(const GLint *)v; return; }
+    if (is_samp(u->type)) {
+        int n = u->count ? u->count : 1;
+        if (is_int && comps == 1 && el < n) {
+            if (count > n - el) count = n - el;
+            memcpy(&u->unit[el], v, (size_t)count * sizeof *u->unit);
+        }
+        return;
+    }
     int n = u->count ? u->count : 1, rows = cols ? comps / cols : comps, size = cols ? cols * 16 : 16;
     if (el + count > n) count = n - el;
     for (int st = 0; st < 2; st++) {
@@ -2003,7 +2021,11 @@ static void uni_read(GLuint pr, GLint loc, void *out, int as_int) {
     prog_t *p = prog_of(pr);
     if (!p || !p->linked || loc < 0 || loc / 4096 >= p->nu) return;
     const puni_t *u = &p->u[loc / 4096]; int el = loc % 4096;
-    if (is_samp(u->type)) { if (as_int) *(GLint *)out = u->unit; else *(GLfloat *)out = (GLfloat)u->unit; return; }
+    if (is_samp(u->type)) {
+        if (el >= (u->count ? u->count : 1)) return;
+        if (as_int) *(GLint *)out = u->unit[el]; else *(GLfloat *)out = (GLfloat)u->unit[el];
+        return;
+    }
     int st = u->off[0] >= 0 ? 0 : 1; if (u->off[st] < 0) return;
     int cols = u->type == T_MAT4 ? 4 : u->type == T_MAT3 ? 3 : u->type == T_MAT2 ? 2 : 0, rows = cols ? cols : tcomps(u->type);
     const uint8_t *d = p->ub[st] + u->off[st] + (size_t)el * (u->stride[st] ? u->stride[st] : cols ? cols * 16 : 16);

@@ -154,6 +154,32 @@ def es100(t, stage):
     t = re.sub(r'\bsample\b', 'gm_sample', t)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
     return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
 
+def lower_constant_sampler_arrays(src):
+    """Split constant-index sampler arrays; keep element identity for GL."""
+    aliases = {}
+    pattern = r'\b(uniform\s+(?:(?:lowp|mediump|highp)\s+)?[iu]?sampler\w*\s+)(\w+)\s*\[\s*(\d+)\s*\]\s*;'
+    for match in list(re.finditer(pattern, src)):
+        declaration, name, size = match[0], match[2], int(match[3])
+        if not 1 <= size <= 16: continue
+        use = r'\b' + re.escape(name) + r'\s*\[\s*([^\[\]]+)\s*\]'
+        body = src.replace(declaration, '', 1)
+        indices = {}
+        for m in re.finditer(use, body):
+            expr = m[1].strip()
+            literal = re.fullmatch(r'(\d+)|int\s*\(\s*(\d+)\.0*\s*\)', expr)
+            if not literal or int(literal[1] or literal[2]) >= size: break
+            indices[expr] = int(literal[1] or literal[2])
+        else:
+            prefix = 'dm_gl_sampler_' + name + '_'
+            while re.search(r'\b' + prefix, src): prefix += '_'
+            names = [prefix + str(i) for i in range(size)]
+            # Names are reserved in the original source before substitution.
+            src = src.replace(declaration, '\n'.join(match[1] + n + ';' for n in names), 1)
+            src = re.sub(use, lambda m: names[indices[m[1].strip()]], src)
+            aliases.update({n: (name, i, size) for i, n in enumerate(names)})
+    return src, aliases
+
+
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1')
@@ -165,6 +191,11 @@ def translate(src, stage, key, tmp):
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     at = r.stdout.find('#version')
     pre = legacy_interface(r.stdout[at:] if at >= 0 else r.stdout, stage)
+    # Vulkan's SPIR-V frontend requires GLSL ES 3.10 or later. Upgrade the
+    # directive only after preprocessing with the original ES 3.00 version,
+    # so __VERSION__ branches and the original shader's lookup key stay intact.
+    pre = re.sub(r'^([ \t]*#version[ \t]+)300([ \t]+es\b)', r'\g<1>310\2', pre, count=1, flags=re.M)
+    pre, sampler_elements = lower_constant_sampler_arrays(pre)
     open(g, 'w').write(fixups(pre))
     r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
@@ -193,7 +224,11 @@ def translate(src, stage, key, tmp):
         if e: return e
     for t in refl.get('textures', []):
         if t.get('array'): return f'sampler array {t["name"]}'
-        f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
+        if t['name'] in sampler_elements:
+            name, elem, count = sampler_elements[t['name']]
+            f.append(f't:{name}={t["binding"]}:{t["type"]}:{elem}:{count}')
+        else:
+            f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
     if any(int(x) > 15 for x in re.findall(r'\[\[(?:sampler|buffer)\((\d+)\)\]\]', m)): return 'a buffer or sampler slot above 15'
