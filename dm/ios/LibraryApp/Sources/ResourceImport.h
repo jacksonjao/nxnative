@@ -9,6 +9,32 @@
 // service can deliver verified chunks without acquiring write access to the
 // app's output file; the app then imports them with its normal sandbox rights.
 // This handles data only. Executable frameworks are never imported here.
+static NSString *const TTImportStorageReason=@"空间不足，分块已保留。";
+static uint64_t TTImportStorageFree(NSString *documents) {
+    return [[NSFileManager.defaultManager attributesOfFileSystemForPath:documents error:nil][NSFileSystemFreeSize] unsignedLongLongValue];
+}
+static uint64_t TTImportRequiredFree(uint64_t total) {return total+(256ull<<20);}
+static void TTImportOutOfSpace(uint64_t total) {
+    @throw [NSException exceptionWithName:@"TonTonImportSpace" reason:TTImportStorageReason
+        userInfo:@{@"required_free_bytes":@(TTImportRequiredFree(total))}];
+}
+// Only recover proven capacity failures. Checksum and destination conflicts
+// remain terminal, and their receipts are retained for review.
+static BOOL TTImportCapacityReceipt(NSString *receiptPath) {
+    NSDictionary *a=[NSFileManager.defaultManager attributesOfItemAtPath:receiptPath error:nil];
+    if(![a[NSFileType] isEqual:NSFileTypeRegular]||[a[NSFileSize] unsignedLongLongValue]>=(8<<20))return NO;
+    NSData *data=[NSData dataWithContentsOfFile:receiptPath];
+    if(!data)return NO;
+    id receipt=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if(![receipt isKindOfClass:NSDictionary.class]||![receipt[@"status"] isEqual:@"failed"])return NO;
+    id code=receipt[@"code"];
+    return [code isEqual:@"insufficient_storage"]||(!code&&[receipt[@"reason"] isEqual:TTImportStorageReason]);
+}
+static BOOL TTImportCapacityRestored(NSString *documents,id manifest) {
+    if(![manifest isKindOfClass:NSDictionary.class]||![manifest[@"bytes"] isKindOfClass:NSNumber.class])return NO;
+    uint64_t total=[manifest[@"bytes"] unsignedLongLongValue];
+    return total>0&&total<(2ull<<40)&&TTImportStorageFree(documents)>TTImportRequiredFree(total);
+}
 static BOOL TTImportMatch(NSString *text, NSString *pattern) {
     return [text isKindOfClass:NSString.class] &&
         [text rangeOfString:pattern options:NSRegularExpressionSearch].length==text.length && text.length;
@@ -80,11 +106,10 @@ static NSDictionary *TTImportOne(NSString *documents,NSString *inbox,NSDictionar
         TTImportRequire([[fm attributesOfItemAtPath:destination error:nil][NSFileSize] unsignedLongLongValue]==total&&
                         [TTImportHashFile(destination) isEqual:sha],@"已有资源与导入清单不同，已保留原文件。");
     }else{
-        uint64_t free=[fm attributesOfFileSystemForPath:documents error:nil][NSFileSystemFreeSize]?
-            [[fm attributesOfFileSystemForPath:documents error:nil][NSFileSystemFreeSize] unsignedLongLongValue]:0;
-        TTImportRequire(free>total+(256ull<<20),@"空间不足，分块已保留。");
+        if(TTImportStorageFree(documents)<=TTImportRequiredFree(total))TTImportOutOfSpace(total);
         NSString *temporary=[inbox stringByAppendingPathComponent:[@".assembling-" stringByAppendingString:NSUUID.UUID.UUIDString]];
         int output=open(temporary.fileSystemRepresentation,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+        if(output<0&&errno==ENOSPC)TTImportOutOfSpace(total);
         TTImportRequire(output>=0,@"无法在应用内创建临时资源。");
         BOOL complete=NO;
         @try{
@@ -101,13 +126,16 @@ static NSDictionary *TTImportOne(NSString *documents,NSString *inbox,NSDictionar
                         count+=(uint64_t)n;TTImportRequire(count<=expected,@"分块在导入时改变。");
                         CC_SHA256_Update(&hash,bytes,(CC_LONG)n);CC_SHA256_Update(&whole,bytes,(CC_LONG)n);
                         ssize_t at=0;while(at<n){ssize_t wrote=write(output,bytes+at,(size_t)(n-at));
+                            if(wrote<0&&errno==ENOSPC)TTImportOutOfSpace(total);
                             TTImportRequire(wrote>0,@"资源写入失败，原资源和分块已保留。");at+=wrote;}
                     }
                     TTImportRequire(n==0&&count==expected&&[TTImportDigest(&hash) isEqual:chunk[@"sha256"]],@"分块校验失败，原资源已保留。");
                 }@finally{close(input);}
             }
             TTImportRequire([TTImportDigest(&whole) isEqual:sha],@"完整资源校验失败。");
-            TTImportRequire(fsync(output)==0,@"资源写入尚未完成。");
+            int synced=fsync(output);
+            if(synced<0&&errno==ENOSPC)TTImportOutOfSpace(total);
+            TTImportRequire(synced==0,@"资源写入尚未完成。");
             NSError *error=nil;
             if(replaceEmpty){
                 NSDictionary *now=[fm attributesOfItemAtPath:destination error:nil];
@@ -197,13 +225,22 @@ static NSArray *TonTonImportPendingResources(NSString *documents) {
             NSString *manifestPath=[folder stringByAppendingPathComponent:@"ImportTask.json"];
             if(!TTImportRegular(manifestPath))continue;
             NSString *receiptPath=[folder stringByAppendingPathComponent:@"ImportResult.json"];
-            if([fm attributesOfItemAtPath:receiptPath error:nil])continue; // A retry requires explicit removal of the receipt.
+            BOOL hasReceipt=[fm attributesOfItemAtPath:receiptPath error:nil]!=nil;
+            if(hasReceipt&&!TTImportCapacityReceipt(receiptPath))continue;
             NSDictionary *result;
             @try{
                 TTImportRequire([[fm attributesOfItemAtPath:manifestPath error:nil][NSFileSize] unsignedLongLongValue]<(8<<20),@"导入清单过大。");
                 NSDictionary *manifest=[NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:manifestPath] options:0 error:nil];
+                if(hasReceipt&&!TTImportCapacityRestored(documents,manifest))continue;
+                hasReceipt=NO;
                 result=TTImportOne(documents,folder,manifest);
-            }@catch(NSException *error){result=@{@"status":@"failed",@"reason":error.reason?:@"导入失败"};}
+            }@catch(NSException *error){
+                if(hasReceipt)continue; // Preserve the existing receipt if its manifest cannot be read.
+                if([error.name isEqual:@"TonTonImportSpace"])
+                    result=@{@"status":@"failed",@"code":@"insufficient_storage",@"reason":TTImportStorageReason,
+                        @"required_free_bytes":error.userInfo[@"required_free_bytes"]};
+                else result=@{@"status":@"failed",@"reason":error.reason?:@"导入失败"};
+            }
             [[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:nil] writeToFile:receiptPath options:NSDataWritingAtomic error:nil];
             [results addObject:result];
         }return results;
