@@ -4708,6 +4708,39 @@ static NSDictionary *nonpoint_sources_manifest(void) {
     });
     return manifest;
 }
+
+// Optional Metal 3 libraries built from the exact, effective non-point source.
+// Keep the ordinary compiler fallback for missing files and incompatible GPUs.
+static id<MTLFunction> nonpoint_offline_function(NvShader *vs, NSString *key,
+                                                NSString *src, NSDictionary *record) {
+    if (DM_GAME_PROGRAM_ID != 0x0400C3F00006E000ull) return nil;
+    NSString *root = [g_msl_dir stringByAppendingPathComponent:@"nonpoint-metal3-v1"];
+    static NSDictionary *manifest; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *data = [NSData dataWithContentsOfFile:[root stringByAppendingPathComponent:@"manifest.json"]];
+        id decoded = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if ([decoded isKindOfClass:[NSDictionary class]]) manifest = decoded;
+    });
+    if (![manifest[@"schema"] isEqual:@1] || ![manifest[@"chain"] isEqual:@(TONTON_SHADER_CHAIN)]) return nil;
+    id entries = manifest[@"shaders"];
+    if (![entries isKindOfClass:[NSDictionary class]]) return nil;
+    id row = entries[key];
+    if (![row isKindOfClass:[NSDictionary class]] ||
+        ![row[@"source_sha256"] isEqual:record[@"source_sha256"]] ||
+        ![row[@"library_sha256"] isEqual:record[@"library_sha256"]] ||
+        ![row[@"effective_source_sha256"] isEqual:nonpoint_digest([src dataUsingEncoding:NSUTF8StringEncoding])]) return nil;
+    NSString *path = [root stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]];
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    if (!data || ![row[@"offline_sha256"] isEqual:nonpoint_digest(data)]) return nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:path] error:nil];
+    if (!lib) return nil;
+    id<MTLFunction> fn = vs->specialized ?
+        [lib newFunctionWithName:vs->fn.name constantValues:[MTLFunctionConstantValues new] error:nil] :
+        [lib newFunctionWithName:vs->fn.name];
+    if (!fn || (vs->rf.nb && [fn newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len)) return nil;
+    vs->nonpoint_lib = lib;
+    return fn;
+}
 static id<MTLFunction> nonpoint_vertex(NvShader *vs, NSError **error) {
     @synchronized (vs) {
         if (!vs->nonpoint_tried) {
@@ -4734,6 +4767,12 @@ static id<MTLFunction> nonpoint_vertex(NvShader *vs, NSError **error) {
                     [NSString stringWithFormat:@"Missing or mismatched non-point source for %@ (chain %s)", key, DMSH_CHAIN]}];
             } else {
                 src = [src stringByReplacingOccurrencesOfString:@"[[point_size]]" withString:@"[[user(dm_unused_point_size)]]"];
+                vs->nonpoint_fn = nonpoint_offline_function(vs, key, src, record);
+                if (vs->nonpoint_fn) {
+                    MLOG("Non-point vertex variant %s loaded precompiled Metal 3; original point/TF entry retained", vs->key);
+                    dispatch_semaphore_signal(compile_slots);
+                    return vs->nonpoint_fn;
+                }
                 MTLCompileOptions *options = [MTLCompileOptions new];
                 options.languageVersion = MTLLanguageVersion3_0;
                 options.preserveInvariance = YES;

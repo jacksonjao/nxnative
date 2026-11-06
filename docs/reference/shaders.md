@@ -1410,3 +1410,18 @@ handle used guest uniform slot 4, byte 40; its texture was separate slot 128, no
 combined slot 1. An R16Uint pass separately rejected a float fragment output.
 Synthetic production-parser, production-descriptor and GPU readback tests pass;
 matching-chain full resources and device picture verification remain required.
+
+### Offline non-point vertex variants on iOS Metal 3
+
+The legacy Mario Kart World renderer can load selected non-point vertex
+variants from `nonpoint-metal3-v1` under the game's MSL resource directory.
+`dm/ios/tools/build_nonpoint_metal3.py` builds keys from the on-device
+compile log against the exact companion source manifest and base libraries.
+The loader checks the chain, source and library hashes, and argument buffer
+length before using the variant. Missing or incompatible variants keep using
+the existing compiler path. The original point and transform-feedback entry
+stays in use for those draws.
+
+On M2 with iPadOS 16.1 the legacy renderer loaded the packaged variants.
+The title sequence still showed long frames with new pipeline compilation
+and texture uploads; a cache hit does not establish gameplay frame rate.
