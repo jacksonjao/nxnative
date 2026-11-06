@@ -36,6 +36,10 @@ UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
 
 static char *g_argv[4]; static int g_argc;
+#ifdef DM_LIBRARY_HOST
+static TonTonGameHost g_independent_host;
+static const void *g_independent_image;
+#endif
 
 // Documents/romfs.img, one RomFS image file (dm/tools/romfs_image.py, scripts/push_romfs.sh): only a complete one counts. Its index is written last and ends the file, so a copy cut off partway is skipped
 static int romfs_image_complete(NSString *path) {
@@ -269,7 +273,8 @@ static int boot_env(void) {
     NSString *moduleTables=dm;
 #ifdef DM_LIBRARY_HOST
     NSString *frameworkError=nil;
-    if (!TonTonPrepareGameFramework(@(getenv("DM_LIBRARY_GAME_ID")),&moduleTables,&frameworkError)) {
+    if (!TonTonPrepareGameFramework(@(getenv("DM_LIBRARY_GAME_ID")),&moduleTables,&frameworkError,
+                                    &g_independent_host,&g_independent_image)) {
         fprintf(stderr,"[RED] boot: %s\n",frameworkError.UTF8String);return 0;
     }
 #endif
@@ -281,6 +286,9 @@ static int boot_env(void) {
     if ([fm fileExistsAtPath:pso]) setenv("DM_PSO_BUNDLE", pso.fileSystemRepresentation, 0);
     chdir(doc.fileSystemRepresentation);
     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(moduleTables.fileSystemRepresentation); g_argc = 2;
+#ifdef DM_LIBRARY_HOST
+    if (g_independent_host.start) return 1;   // Start after the library applies per-game settings.
+#endif
     dm_host_preload_start(g_argc, g_argv);   // Module tables / relocation / takeover run early in the background, in parallel with UIKit startup (and the launcher: the settings it sets are read when the game starts)
     return 1;
 }
@@ -300,6 +308,16 @@ void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal
     pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);
 }
 int front_ios_boot_ok(void) { return g_boot_ok; }
+
+static void focus_game(int event) {
+#ifdef DM_LIBRARY_HOST
+    if (g_boot_ok && g_independent_host.focus) {
+        g_independent_host.focus(event);
+        return;
+    }
+#endif
+    front_ios_focus_event(event);
+}
 
 @class SceneDelegate;
 @interface App : UIResponder <UIApplicationDelegate>
@@ -354,6 +372,21 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
             [owner.window.rootViewController presentViewController:alert animated:YES completion:nil];return;
         }
         TonTonApplyGlobalSettings(titleID);
+        if (g_independent_host.start) {
+            const char *error = g_independent_host.start((const char *const *)g_argv, g_argc, g_independent_image);
+            if (error) {
+                fprintf(stderr,"[RED] boot: independent game host: %s\n",error);
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"卡带暂时无法启动"
+                    message:@"游戏自带引擎未能启动。" preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+                [owner.window.rootViewController presentViewController:alert animated:YES completion:nil];
+                g_independent_host = (TonTonGameHost){0};
+                return;
+            }
+            g_boot_ok=1;
+            g_independent_host.present((__bridge void *)owner.window);
+            return;
+        }
         g_boot_ok=1;
         owner.window.rootViewController=front_ios_root();
     });
@@ -366,22 +399,22 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 #ifdef DM_GTA_NATIVE
     if(TonTonGTAVIsActive()){TonTonGTAVFocus(0,0);return;}
 #endif
- front_ios_focus_event(0); }
+ focus_game(0); }
 - (void)sceneDidEnterBackground:(UIScene *)s {
 #ifdef DM_GTA_NATIVE
     if(TonTonGTAVIsActive()){TonTonGTAVFocus(0,1);return;}
 #endif
- front_ios_focus_event(1); }
+ focus_game(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s {
 #ifdef DM_GTA_NATIVE
     if(TonTonGTAVIsActive()){TonTonGTAVFocus(0,0);return;}
 #endif
- front_ios_focus_event(2); }
+ focus_game(2); }
 - (void)sceneDidBecomeActive:(UIScene *)s {
 #ifdef DM_GTA_NATIVE
     if(TonTonGTAVIsActive()){TonTonGTAVFocus(1,0);return;}
 #endif
- front_ios_focus_event(3); }
+ focus_game(3); }
 @end
 
 int main(int argc, char **argv) {

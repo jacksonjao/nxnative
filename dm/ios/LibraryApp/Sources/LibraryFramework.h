@@ -6,6 +6,7 @@
 #include "loader_image.h"
 #include "game_profile_runtime.h"
 #include "dmsh_chain.h"
+#import "IndependentGameHost.h"
 
 // This fork's signed __TEXT layout differs from newer upstream frameworks.
 // Never accept a foreign framework merely because its title ID matches.
@@ -19,13 +20,15 @@ static NSString *TonTonFrameworkProblem(NSDictionary *manifest, NSString *title,
     if (![manifest[@"title_id"] isEqual:title.uppercaseString] ||
         ![manifest[@"modules"] isEqual:modules] || !modules.count)
         return @"游戏程序与所选卡带不匹配。";
-    if (![manifest[@"chain"] isEqual:@"b-" DMSH_CHAIN] ||
-        ![manifest[@"tonton_host_abi"] isEqual:TONTON_FRAMEWORK_ABI])
+    BOOL independent = TonTonIndependentManifest(manifest);
+    if (independent ? !TonTonIndependentChain(manifest[@"chain"]) :
+        (![manifest[@"chain"] isEqual:@"b-" DMSH_CHAIN] ||
+         ![manifest[@"tonton_host_abi"] isEqual:TONTON_FRAMEWORK_ABI]))
         return @"游戏程序需要用当前游戏匣的兼容引擎重新构建。";
     NSString *fw=[@"DmGame" stringByAppendingFormat:@"%@.framework",title.uppercaseString];
     if (![manifest[@"framework"] isEqual:fw] || ![manifest[@"framework_executable"] isEqual:@"DmGame"] ||
         ![manifest[@"image_marker"] isEqual:@"dm_game_image_marker"] ||
-        ![manifest[@"loader"] isEqual:@"FR"] || ![manifest[@"nro_count"] isEqual:@0])
+        (!independent && ![manifest[@"loader"] isEqual:@"FR"]) || ![manifest[@"nro_count"] isEqual:@0])
         return @"游戏程序的加载格式尚不兼容。";
     NSString *min=manifest[@"min_os"];
     NSCharacterSet *invalid=[[NSCharacterSet characterSetWithCharactersInString:@"0123456789."] invertedSet];
@@ -40,7 +43,10 @@ static NSString *TonTonFrameworkProblem(NSDictionary *manifest, NSString *title,
 
 // nil framework means the existing embedded cartridge remains in use. Foreign
 // downloaded code in Documents is never searched or dlopened.
-static BOOL TonTonPrepareGameFramework(NSString *title, NSString **tables, NSString **failure) {
+static BOOL TonTonPrepareGameFramework(NSString *title, NSString **tables, NSString **failure,
+                                       TonTonGameHost *host, const void **image) {
+    *host = (TonTonGameHost){0};
+    *image = NULL;
     NSString *fw=[NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:
         [NSString stringWithFormat:@"DmGame%@.framework",title.uppercaseString]];
     if (![NSFileManager.defaultManager fileExistsAtPath:fw]) return YES;
@@ -64,15 +70,27 @@ static BOOL TonTonPrepareGameFramework(NSString *title, NSString **tables, NSStr
     }
     if (problem) { if(failure)*failure=problem;return NO; }
     NSString *executable=[fw stringByAppendingPathComponent:@"DmGame"];
-    void *handle=dlopen(executable.fileSystemRepresentation,RTLD_LOCAL|RTLD_NOW);
+    void *handle=dlopen(executable.fileSystemRepresentation,RTLD_LOCAL|RTLD_NOW|RTLD_FIRST);
     if (!handle) { if(failure)*failure=@"系统无法验证并加载这款游戏的签名程序。";return NO; }
     void *marker=dlsym(handle,"dm_game_image_marker");Dl_info info={0};
     if (!marker || !dladdr(marker,&info) || !info.dli_fbase || !info.dli_fname ||
         ![[@(info.dli_fname) stringByResolvingSymlinksInPath] isEqual:executable.stringByResolvingSymlinksInPath] ||
-        ((const struct mach_header_64 *)info.dli_fbase)->filetype!=MH_DYLIB ||
-        !dm_set_game_image_header(info.dli_fbase)) {
+        ((const struct mach_header_64 *)info.dli_fbase)->filetype!=MH_DYLIB) {
         // Do not unload an image whose static initialization may have run.
         if(failure)*failure=@"这款游戏的签名模块身份不正确，未启动。";return NO;
+    }
+    if (TonTonIndependentManifest(manifest)) {
+        if (!TonTonReadIndependentHost(handle, info.dli_fbase, manifest[@"chain"], host)) {
+            if(failure)*failure=@"游戏自带引擎的接口或着色器版本不匹配。";
+            return NO;
+        }
+        *image = info.dli_fbase;
+        *tables = dm;
+        return YES;
+    }
+    if (!dm_set_game_image_header(info.dli_fbase)) {
+        if(failure)*failure=@"这款游戏的签名模块身份不正确，未启动。";
+        return NO;
     }
     *tables=dm;
     fprintf(stderr,"boot: signed game framework %s, ABI tonton-signed-text-v1\n",executable.fileSystemRepresentation);
