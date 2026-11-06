@@ -21,6 +21,7 @@
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
 #include "nvn_mtl.h"
+#include "nvn_shader_image.h"
 #include "nvn_prepare.h"
 #include "nvn_obj.h"
 #include "../tex/nvn_fmt_mtl.h"
@@ -3556,6 +3557,8 @@ static void shmap_load(void) {
     const char *m = getenv("DM_MSL_DIR");
     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from the game profile's dmsh_chain.h (tools/dmsh_chain.py); a host built from an old source tree only accepts libraries of the old version
     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
+    if (nvn_shader_image_open(g_msl_dir, [NSData dataWithContentsOfFile:[g_msl_dir stringByAppendingPathComponent:@"inputs.tsv"]]))
+        MLOG("shader image: %s.img", g_msl_dir.UTF8String);
     if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("【红】着色器库目录 %s 不存在：本源码树的翻译链版本 %s 还没出包（dm/gfx/tools/dmsh_build.py）", g_msl_dir.UTF8String, DMSH_CHAIN);
     NSString *cp = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"c1_full.tsv"];   // Same directory as the mapping table (Mac: dm/games/<id>; iOS: dm/ inside the App, copied along by build_ipa.sh)
     NSString *ct = cp ? [NSString stringWithContentsOfFile:cp encoding:NSUTF8StringEncoding error:nil] : nil;
@@ -3651,6 +3654,12 @@ static void pso_record(const char *fmt, ...) {
 // Build the library from a .metallib file without permanently occupying a file descriptor: newLibraryWithURL keeps that file open for as long as the library object lives (one per game shader - of the 258 descriptors the iOS app permanently holds in a run, 213 are these,
 // while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
+    nvn_shader_mapping map;
+    if (nvn_shader_image_map(g_msl_dir, path, &map)) {
+        dispatch_data_t data = dispatch_data_create(map.bytes, map.size, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
+            ^{ munmap(map.base, map.mapped); });
+        return [g_dev newLibraryWithData:data error:err];
+    }
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"打不开 %@", path]}]; return nil; }
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
@@ -3686,7 +3695,7 @@ static id<MTLLibrary> bounded_atomic_library(NSString *key, NSError **error) {
     NSData *meta = [NSData dataWithContentsOfFile:[root stringByAppendingPathComponent:[key stringByAppendingString:@".json"]]];
     NSDictionary *record = meta ? [NSJSONSerialization JSONObjectWithData:meta options:0 error:nil] : nil;
     NSData *source = [NSData dataWithContentsOfFile:[root stringByAppendingPathComponent:[key stringByAppendingString:@".metal"]]];
-    NSData *base = [NSData dataWithContentsOfFile:[g_msl_dir stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]] options:NSDataReadingMappedIfSafe error:nil];
+    NSData *base = nvn_shader_data(g_msl_dir, [g_msl_dir stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]]);
     if (![record[@"schema"] isEqual:@1] || ![record[@"chain"] isEqual:@DMSH_CHAIN] || ![record[@"kind"] isEqual:@"bounded-image-atomics-v1"] || ![record[@"source_sha256"] isEqual:nonpoint_digest(source)] || ![record[@"library_sha256"] isEqual:nonpoint_digest(base)]) {
         if (error) *error = [NSError errorWithDomain:@"NVNLegacyAtomics" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Missing or mismatched bounded image-atomic source; export_legacy_atomics.py is required"}];
         return nil;
@@ -3709,7 +3718,7 @@ void mtl_set_depth_zero(int on) {
 static NvShader *shader_load(NSString *pc, int stage) {
     NSError *e = nil;
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
-    NSData *jd = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]];
+    NSData *jd = nvn_shader_data(g_msl_dir, [NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
     if (j[@"legacy_image_atomic"]) {
         NSData *bytes = [NSData dataWithContentsOfFile:lp options:NSDataReadingMappedIfSafe error:nil];
@@ -4590,7 +4599,7 @@ static id<MTLFunction> legacy_dual_function(NvShader *fs) {
         NSDictionary *record = manifest[@"fragment_dual_sources"][key];
         NSString *root = [g_msl_dir stringByAppendingPathComponent:@"nonpoint-v1"];
         NSData *source = [NSData dataWithContentsOfFile:[root stringByAppendingPathComponent:[key stringByAppendingString:@".dual.metal"]]];
-        NSData *base = [NSData dataWithContentsOfFile:[g_msl_dir stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]] options:NSDataReadingMappedIfSafe error:nil];
+        NSData *base = nvn_shader_data(g_msl_dir, [g_msl_dir stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]]);
         if (![manifest[@"schema"] isEqual:@1] || ![manifest[@"chain"] isEqual:@DMSH_CHAIN] ||
             ![record[@"source_sha256"] isEqual:nonpoint_digest(source)] ||
             ![record[@"library_sha256"] isEqual:nonpoint_digest(base)]) {
@@ -4755,7 +4764,7 @@ static id<MTLFunction> nonpoint_vertex(NvShader *vs, NSError **error) {
             NSString *key = @(vs->key);
             NSDictionary *record = manifest[@"shaders"][key];
             NSData *source = [NSData dataWithContentsOfFile:[root stringByAppendingPathComponent:[key stringByAppendingString:@".metal"]]];
-            NSData *library = [NSData dataWithContentsOfFile:[g_msl_dir stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]] options:NSDataReadingMappedIfSafe error:nil];
+            NSData *library = nvn_shader_data(g_msl_dir, [g_msl_dir stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]]);
             NSError *e = nil;
             BOOL valid = [manifest[@"schema"] isEqual:@1] && [manifest[@"chain"] isEqual:@DMSH_CHAIN]
                 && [record[@"source_sha256"] isEqual:nonpoint_digest(source)]

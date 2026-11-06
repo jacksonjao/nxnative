@@ -1256,6 +1256,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Team Sonic Racing](../../dm/games/010092B0091D0000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_nsp_mac.py` (`test_ios_after_mac_keeps_mac_libraries`, `test_ios_after_mac_of_another_chain`).
 
+### Install a large iOS NVN shader library as one file
+
+- **Symptom:** Installing a title with tens of thousands of loose compiled shader files can stall during package extraction.
+- **Cause:** The installer must create each reflection and Metal library file independently. The host already has an offline compilation result for each one.
+- **Fix:** Set `DM_PACK_SHADER_IMAGE=1` on an IPA build to package those outputs in `msl/b-<chain>.img`. The packer checks the index and hashes each file after writing; it retains the loose originals. The host checks the image's profile stamp against the loose stamp and maps only the needed shader range. Readiness tables and auxiliary variant directories stay in their normal locations. A loose shader override takes precedence over the corresponding packed family.
+- **Found on:** A Pokémon Violet transfer fixture reproduced the many-file layout. Both iOS renderers compile with the image reader, and a synthetic packed shader executed on the Mac GPU; a full iOS install remains to be checked.
+
 ### Old shader library folders grew a game's build folder with each chain change
 
 - **Symptom:** the build folder of a game (`<id>_build/shader/`) gains about 2 GB for Breath of the Wild with every upstream update that changes the shader chain: after two updates `shader/cache` held `b-157e1b96c8da` (2.1 GB) and `b-a78f966a7b38` (2.3 GB) besides the current one, and the next build added a third.

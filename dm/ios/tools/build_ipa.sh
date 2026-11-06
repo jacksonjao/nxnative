@@ -6,6 +6,7 @@
 # Usage: dm/ios/tools/build_ipa.sh [output.ipa | --prepare-xcode]; --prepare-xcode generates the project without building, signing or packing.
 #   Environment: GAME=game profile (dm/games/<base game title ID>, or one in DM_GAMES_DIR; required), W=the game's work folder (required: <NSP folder>/<title ID>-work, never the home folder), PATCHED / ROMFS / MSL_IOS can each be overridden
 #   DM_COPY_ROMFS=NO leaves the game files (RomFS) out of the IPA, as it does for the Xcode build phase: the package then stays small (a large game's full package can exceed what iOS extracts), and the app takes the files from Documents/romfs.img (scripts/push_romfs.sh); default: they are packed
+#   DM_PACK_SHADER_IMAGE=1 packs compiled NVN libraries into a verified single file; the profile stamp and other resources remain loose. IPA mode only.
 #   DM_ENTITLEMENTS=<plist> is the unsigned IPA's entitlements, signed ad-hoc into the executable (default: <profile>/ios.entitlements, then Increased Memory Limit; an empty string = none)
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn / vulkan (default: by the shader libraries in MSL_IOS)
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
@@ -39,6 +40,9 @@ PKG=$(gp package)
 if [ -z "${ROMFS:-}" ] && [ -f "$W/data/$PKG/RomFS.img" ]; then ROMFS=$W/data/$PKG/RomFS.img; fi
 PATCHED=${PATCHED:-$W/build/patched_$PKG}; ROMFS=${ROMFS:-$W/data/$PKG/RomFS}; MSL_IOS=${MSL_IOS:-$W/build/ios/dmsh_b}; AOC=${AOC-$W/data/aoc}
 PREPARE_XCODE=NO; [ "${1:-}" != --prepare-xcode ] || PREPARE_XCODE=YES
+if [ "${DM_PACK_SHADER_IMAGE:-0}" = 1 ] && [ "$PREPARE_XCODE" = YES ]; then
+  die "DM_PACK_SHADER_IMAGE is supported in IPA mode only"
+fi
 OUT_IPA=${1:-$(dirname "$W")/$(gp ipa)}; O=$W/build/ios/pkg; DD=$O/dd
 XCODE_DD=${DM_XCODE_DERIVED_DATA:-$W/build/ios/xcode-dd}
 MODS=$(gp modules); MARKER=$(gp romfs_marker)
@@ -226,12 +230,28 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
 elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
-MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
-t "pack IPA (already-compressed game files stored, everything else deflated)"
-# The pulling vertex libraries (<key>_bp, dm/gfx/tools/dmsh_pull.py) serve the hybrid pipelines. Default to the same pso_mtl4 setting compiled by gen_build.py; IOS_PULL=0 / 1 overrides it.
-# The pipeline archive's bases are made of them, so an IPA with an archive (pso/) always carries them, whatever IOS_PULL says (an Xcode build copies them always).
+# The shader image and loose IPA use the same policy for pulling vertex libraries.
 PULL=$(sed -n 's/^#define DM_GAME_PSO_MTL4 //p' "$DM/host/gen/$GAME/game_profile.h") || die "read game profile header"
 case "$PULL" in 0|1) ;; *) die "no DM_GAME_PSO_MTL4 in generated game profile";; esac
+if [ "${DM_PACK_SHADER_IMAGE:-0}" = 1 ] && [ "$GFXAPI" = nvn ]; then
+  image="$O/$MSLDIR.img"
+  image_options=(--output "$image")
+  [ -n "${PSO:-}" ] || [ "${IOS_PULL:-$PULL}" = 1 ] || image_options+=(--skip-pulling)
+  python3 "$DM/tools/pack_nvn_shader_image.py" "$MSL_IOS/$MSLDIR" "${image_options[@]}" || die "pack NVN shader image"
+  MAPS+=("$P/msl/$MSLDIR.img=$image")
+  # Keep readiness stamps and auxiliary shader subdirectories accessible to older code.
+  # Match the packer's file pattern; all other entries retain their existing path.
+  for f in "$MSL_IOS/$MSLDIR/"*; do
+    leaf=${f##*/}
+    [[ "$leaf" =~ ^[a-f0-9]{16}_b[a-z0-9]*\.(json|metallib)$ ]] && continue
+    MAPS+=("$P/msl/$MSLDIR/$leaf=$f")
+  done
+else
+  MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR")
+fi
+MAPS+=("$P=$APP")
+t "pack IPA (already-compressed game files stored, everything else deflated)"
+# The pipeline archive always carries the pulling vertex libraries, whatever IOS_PULL says.
 # Keep this array nonempty: macOS Bash 3.2 treats an empty array as unset under set -u.
 PACK_OPTS=(--store "$(gp zip_store)"); [ -n "${PSO:-}" ] || [ "${IOS_PULL:-$PULL}" = 1 ] || PACK_OPTS+=(--skip-suffix _bp.metallib)
 python3 tools/pack_ipa.py "$OUT_IPA" "${PACK_OPTS[@]}" --skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id "${MAPS[@]}" || die "pack_ipa"
