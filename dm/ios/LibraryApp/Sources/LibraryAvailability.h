@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include "game_profile_runtime.h"
 #include "dmsh_chain.h"
+#import "IndependentGameHost.h"
 #ifdef DM_WEB_RUNTIME
 #import "../../Engines/TonTonWebRuntime.h"
 #endif
@@ -21,6 +22,11 @@ static BOOL TonTonDirectory(NSString *path) {
 }
 static NSDictionary *TonTonGameReadiness(NSString *titleID, NSString *gamesRoot, NSString *bundledRoot) {
     NSString *title = titleID.lowercaseString;
+    NSString *frameworkManifest = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"DmGame%@.framework/game.manifest.json", title.uppercaseString]];
+    NSData *manifestData = frameworkManifest ? [NSData dataWithContentsOfFile:frameworkManifest] : nil;
+    id manifest = manifestData ? [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil] : nil;
+    NSString *chain = TonTonResourceChain(manifest, @"b-" DMSH_CHAIN);
 #ifdef DM_WEB_RUNTIME
     if ([title isEqual:@"redalert2"]) {
         BOOL ready=TonTonWebRuntimeAvailable(title,[gamesRoot stringByAppendingPathComponent:title]);
@@ -51,8 +57,9 @@ static NSDictionary *TonTonGameReadiness(NSString *titleID, NSString *gamesRoot,
         if (!resourceRoot) {
             code = @"shader_resources_missing"; detail = @"这款游戏的着色器资源尚未完整传入。";
         } else {
-            NSString *stampPath = [resourceRoot stringByAppendingPathComponent:@"msl/b-" DMSH_CHAIN "/inputs.tsv"];
-            NSString *stamp = [NSString stringWithContentsOfFile:stampPath encoding:NSUTF8StringEncoding error:nil];
+            NSString *stampPath = chain ? [resourceRoot stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"msl/%@/inputs.tsv", chain]] : nil;
+            NSString *stamp = stampPath ? [NSString stringWithContentsOfFile:stampPath encoding:NSUTF8StringEncoding error:nil] : nil;
             NSString *row = [@"game\t" stringByAppendingString:title.uppercaseString];
             if (![[stamp componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] containsObject:row]) {
                 code = @"shader_identity_mismatch"; detail = @"着色器版本与当前游戏程序不匹配，需补齐对应版本。";
@@ -73,5 +80,5 @@ static NSDictionary *TonTonGameReadiness(NSString *titleID, NSString *gamesRoot,
         }
     }
     return @{@"ready":@(code == nil), @"code":code ?: @"ready", @"detail":detail ?: @"可以打开",
-             @"chain":@DMSH_CHAIN, @"resources":resourceRoot ?: @""};
+             @"chain":chain ? [chain substringFromIndex:2] : @"", @"resources":resourceRoot ?: @""};
 }

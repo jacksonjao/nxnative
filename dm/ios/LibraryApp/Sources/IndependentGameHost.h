@@ -30,6 +30,14 @@ static BOOL TonTonIndependentChain(id value) {
     return [hash rangeOfCharacterFromSet:other].location == NSNotFound;
 }
 
+// Return the complete b-… directory name. A signed independent host owns
+// its shader contract; the shared engine's upgrade must not change it.
+static NSString *TonTonResourceChain(NSDictionary *manifest, NSString *sharedChain) {
+    if (!TonTonIndependentManifest(manifest)) return sharedChain;
+    NSString *chain = manifest[@"chain"];
+    return TonTonIndependentChain(chain) ? chain : nil;
+}
+
 static void *TonTonImageSymbol(void *handle, const char *name, const void *image) {
     void *symbol = dlsym(handle, name);
     Dl_info owner = {0};
