@@ -32,6 +32,13 @@
 - **Fix:** count uncompressed bytes as they are read and compare them with the listed size before completing either streamed method. A mismatch stops the pack and removes the partial archive, preserving the previous IPA and its reuse index. Regression tests cover growth and shrinkage with both deflate and store.
 - **Found on:** synthetic IPA inputs while reviewing [PR #279](https://github.com/seedds/nxnative/pull/279); no game files required.
 
+### Updating the iOS library shell invalidates a game's shader chain
+
+- **Symptom:** after a shell update, a cartridge that ships its own engine appears incompatible even though the installed game framework and shader library have not changed.
+- **Cause:** a shared-host cartridge (`FR`) uses the shell's engine, so its manifest and shader resources must match that engine. An independent cartridge (`FH`) carries its own engine and can require a different chain.
+- **Fix:** select the resource chain from the signed manifest only for `tonton-independent-host-v1`. The shell validates the title, module tables and minimum OS, then checks the entry points and the engine's declared chain against that same signed image before starting it. Old shared-host cartridges keep their existing path. This avoids rebuilding a compatible independent cartridge when the shell alone is updated. A change to the game's own engine or shader contract still needs a matching build. Code lives in the signed app bundle; game data and saves remain separate.
+- **Check:** the iOS framework tests check both manifest routes, symbol ownership and rejection of a mismatched chain. The library starts one game engine per app process; the tests do not imply that a running game can be unloaded to start another in the same process.
+
 ## RomFS images
 
 ### RomFS folder transfers fail or leave stale game files
