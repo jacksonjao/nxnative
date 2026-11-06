@@ -13,6 +13,8 @@ MESH = '0f972afb8a9dbd9a_b.metal'
 PIXEL = '3cafb02cdf0d87fb_b.metal'
 MESH_SHA = '943364e44dc818938d00df2788d1ca83013e82260174cb7befa2d6bc5738be3f'
 PIXEL_SHA = 'ba74fa9d4434728a5ce4282397b262251b0fb6947d710ab1a44de1b7af00ddc2'
+SECONDARY = '11ed01f0618a65a3_b.metal'
+SECONDARY_SHA = '93ab05f794f3f8ac5a4857b1823dd15f0ad098f08a9e3dc7de9d4cda13440b8b'
 
 
 def replace(source, before, after, count):
@@ -51,15 +53,27 @@ def repair(mesh, pixel):
     return mesh, pixel
 
 
+def repair_secondary(mesh):
+    # The second draw in the same terrain pass uses the same packed-index
+    # update scheme. Do not change its interface or its geometry.
+    return replace(mesh, 'float _1432 = as_type<float>(_35[int(_1424)]);',
+                   'float _1432 = as_type<float>(atomic_load_explicit('
+                   '(threadgroup atomic_uint*)&_35[int(_1424)], memory_order_relaxed));', 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mesh', type=Path)
     parser.add_argument('pixel', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--secondary', type=Path)
     args = parser.parse_args()
     mesh, pixel = repair(read(args.mesh, MESH_SHA), read(args.pixel, PIXEL_SHA))
     args.output.mkdir(parents=True, exist_ok=True)
-    for name, source in ((MESH, mesh), (PIXEL, pixel)):
+    sources = [(MESH, mesh), (PIXEL, pixel)]
+    if args.secondary:
+        sources.append((SECONDARY, repair_secondary(read(args.secondary, SECONDARY_SHA))))
+    for name, source in sources:
         with (args.output / name).open('x') as output:
             output.write(source)
 
