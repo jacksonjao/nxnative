@@ -679,20 +679,46 @@ static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / t
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
-static void pool_res(int i) {
-    if (g_pools[i].res) return;
-    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+static int defer_pool_buffer(void) {
+    // Opt this in only for the affected Switch 2 profile until its rendering has been checked.
+    return !strcasecmp(DM_GAME_ID, "0400C3F00006E000");
 }
-void mtl_pool_add(const void *mem, uint64_t size) {
-    mtl_init(); g_reg_gen++;
-    uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
-    uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1);
-    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+
+// Caller holds g_mu. The pool's pages are not wrapped until Metal needs an address.
+// An alias gives Metal writable pages without disabling the guest dirty tracker.
+static void pool_buf(int i, int lazy) {
+    pool_ent *p = &g_pools[i];
+    if (p->buf) return;
+    uintptr_t a = p->base, pg = (uintptr_t)getpagesize();
+    uintptr_t b = (p->hi + pg - 1) & ~(pg - 1);
+    const void *mem = p->key;
+    uint64_t size = p->hi - p->lo;
+    void *mapping = (void *)a;
+    void (^free_alias)(void *, NSUInteger) = nil;
+    if (lazy) {
+        vm_address_t alias = 0;
+        vm_prot_t cur = 0, max = 0;
+        if (vm_remap(mach_task_self(), &alias, b - a, 0, VM_FLAGS_ANYWHERE,
+                     mach_task_self(), (vm_address_t)a, FALSE, &cur, &max,
+                     VM_INHERIT_NONE) == KERN_SUCCESS) {
+            if (!mprotect((void *)alias, b - a, PROT_READ | PROT_WRITE)) {
+                mapping = (void *)alias;
+                free_alias = ^(void *m, NSUInteger length) {
+                    vm_deallocate(mach_task_self(), (vm_address_t)m, length);
+                };
+            } else vm_deallocate(mach_task_self(), alias, b - a);
+        }
+        if (!free_alias) {
+            static int warned;
+            if (!warned++) MLOG("[RED] lazy memory pool %p: writable alias unavailable", mem);
+        }
+    }
+    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:mapping length:b - a options:MTLResourceStorageModeShared deallocator:free_alias];
     // Pokémon Legends: Z-A: twice on the Mac a small pool's buffer was refused although its pages were one read-write VM region, both times while another heavy job (a shader compile,
     // a second game instance) took the machine's memory; every run on an idle machine created all of them. Wiring the pages may fail under memory pressure: retry for up to about 2 s
     for (int t = 0; !buf && t < 12; t++) {
         usleep(10000u << (t < 4 ? t : 4));
-        buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+        buf = [g_dev newBufferWithBytesNoCopy:mapping length:b - a options:MTLResourceStorageModeShared deallocator:free_alias];
         if (buf) MLOG("[RED] memory pool %p+%#llx: the zero-copy buffer was refused, created at retry %d", mem, (unsigned long long)size, t + 1);
     }
     if (!buf) {   // say what the pages looked like: every VM region over the range, with its protection (an unmapped page in the range is the usual cause)
@@ -704,12 +730,34 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         }
         MDIE("memory pool %p+%#llx: failed to create the zero-copy buffer over %#lx..%#lx", mem, (unsigned long long)size, (unsigned long)a, (unsigned long)b);
     }
+    p->buf = buf;
+    p->gpu = buf.gpuAddress;
+    [g_keep addObject:buf];
+    if (lazy) {
+        static uint64_t wrapped_bytes, wrapped_count;
+        wrapped_bytes += b - a;
+        ++wrapped_count;
+        if (wrapped_count <= 16 || wrapped_count % 128 == 0)
+            MLOG("lazy memory pool: wrapped %llu buffers, %llu MiB cumulative, %d pools registered",
+                 (unsigned long long)wrapped_count, (unsigned long long)(wrapped_bytes >> 20), g_npool);
+    }
+}
+static void pool_res(int i) {
+    if (g_pools[i].res) return;
+    pool_buf(i, defer_pool_buffer());
+    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+}
+void mtl_pool_add(const void *mem, uint64_t size) {
+    mtl_init(); g_reg_gen++;
+    uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
+    uintptr_t a = lo & ~(pg - 1);
     pthread_mutex_lock(&g_mu);
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
-    g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC)};   // not in the residency set yet: put in the first time it is addressed (pool_res)
+    int i = g_npool++;
+    g_pools[i] = (pool_ent){lo, hi, a, nil, 0, mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC)};
     g_pool_adds++;
-    [g_keep addObject:buf];
+    if (!defer_pool_buffer()) pool_buf(i, 0);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -722,9 +770,12 @@ void mtl_pool_del(const void *mem) {
     // autoreleased there, so every finalized pool buffer stayed alive for good (Ghost Trick: Phantom Detective, 125 buffers and 6.6 GB of GPU allocations 300 frames into the boot, 0 with the pool)
     @autoreleasepool {
     for (int i = 0; i < g_npool; i++)
-        if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_release(b); if (g_pools[i].res) g_pool_res_n--;
-            if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
-            [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); break; }
+        if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; if (g_pools[i].res) g_pool_res_n--;
+            if (b) {
+                [g_keep removeObject:b]; defer_obj_release(b);
+                if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
+                [g_dead_pools addObject:b];
+            } g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); break; }
     }
     pthread_mutex_unlock(&g_mu);
 }
@@ -7425,10 +7476,10 @@ static uint64_t gmem_map_gpu(void) {
     gen = atomic_load(&g_pool_gen); pidx_sort();
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
-        if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
+        if (!p->res) { pool_buf(g_pidx[k], defer_pool_buffer()); res_add(p->buf); p->res = 1; g_pool_res_n++; }
         uint64_t e[3] = {lo, hi, p->gpu - p->base}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
     }
     pthread_mutex_unlock(&g_mu);
