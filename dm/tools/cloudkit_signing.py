@@ -31,7 +31,13 @@ def configure(profile, info, entitlements, app_id, container, environment):
     for key in APP_IDS:
         if key in entitlements and entitlements[key] != app_id:
             raise ValueError("Changing the existing app identifier is not supported")
-    if container not in allowed.get(CONTAINERS, []) or "CloudKit" not in allowed.get(SERVICES, []):
+    # Apple development profiles may grant all iCloud services with "*".
+    # Keep the requested app entitlement restricted to CloudKit and require
+    # the specific container in the profile either way.
+    services = allowed.get(SERVICES, [])
+    if isinstance(services, str):
+        services = [services]
+    if container not in allowed.get(CONTAINERS, []) or not {"CloudKit", "*"}.intersection(services):
         raise ValueError("The profile does not authorize CloudKit for this container")
     environments = allowed.get(ENVIRONMENT, [])
     if isinstance(environments, str):
