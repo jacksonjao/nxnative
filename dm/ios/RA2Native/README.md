@@ -42,6 +42,15 @@ port still needs the game's file-write paths, touch input, lifecycle handling,
 and a reliable way back to the library. The desktop main function is not yet
 an application integration API.
 
+For the private iOS SDL2 build, `prepare_touch_overlay.py` generates a reviewed
+replacement for `SDL_uikitview.m`; compile it with this directory on the include
+path and the original UIKit source directory on the quote include path. Replace
+only that object in a copy of the SDL2 archive used by the two Red Alert
+frameworks. The overlay maps taps to left click, drags to box selection, and
+stationary two-finger taps to right click at their midpoint. It passes actual
+mouse and trackpad input to the original SDL path. This affects neither the
+BoxedWine fallback nor Switch games. Device gesture usability still needs review.
+
 Device evidence on M2 / iPadOS 16.1 so far: dynamic 4 GiB guest address-space
 reservation and heap checks, native framework loading and entry resolution,
 and actual CoreText file discovery plus FreeType Latin/Chinese text raster.
