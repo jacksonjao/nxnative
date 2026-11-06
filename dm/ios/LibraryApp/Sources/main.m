@@ -61,6 +61,13 @@ void TonTonApplyGlobalSettings(NSString *titleID){
             if([choice isEqual:@"unlimited"]||[choice isEqual:@"game"])setenv(key.UTF8String,choice.UTF8String,1);
             continue;
         }
+        // The native FPS label belongs to the library front end, even when a
+        // data-only game import has no per-game launcher schema.
+        if([key isEqual:@"DM_SHOW_FPS"]){
+            if([choice isEqual:@"0"]||[choice isEqual:@"1"])
+                setenv(key.UTF8String,choice.UTF8String,1);
+            continue;
+        }
         NSDictionary *setting=librarySetting(titleID,key);
         if(!setting)continue;
         NSArray *options=[setting[@"options"] isKindOfClass:NSArray.class]?setting[@"options"]:@[];
