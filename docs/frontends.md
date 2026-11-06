@@ -73,6 +73,14 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
 - **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** only skips the settings screen (the iPhone's, or a Mac app's window): the saved choices still apply.
 - **A sandboxed front end** cannot write another app's preferences domain; this store is for front ends outside the App Sandbox, as NX2Apple is.
 
+### App-managed iCloud saves
+
+The native save host uses a private CloudKit database when the signed app's Info.plist contains `DMCloudSaveContainer`. All participating app IDs must authorize the same container and CloudKit environment. Share the container across those IDs in the Apple developer account. In the Development environment, create the `TonTonSaveV1` record type with `digest` (String) and `bundle` (Asset), then deploy the schema before using the Production environment. One record stores the verified archive for a base title ID; uploads use the current CloudKit record revision. No public database or folder bookmark is used. `DM_SAVE_SYNC=0` still disables sync.
+
+Use `dm/tools/cloudkit_signing.py` on staged metadata, supplying the Apple provisioning profile, resolved app Info.plist, existing app identifier and entitlements, and the chosen container and environment. It only outputs to a new directory and rejects profiles for a different identity or without the required grants. Use those outputs when signing the staged app and verify the final effective entitlements against the profile before installation. An ad-hoc signature cannot authorize CloudKit. The Mac packer includes the transport in both the launcher and host; a capability-enabled Mac package must grant the required entitlement to the CloudKit clients, including the host helper.
+
+For an in-place update, compare the installed application identifier with the staged profile and package first. Keep existing device data and local backups. Validate with two signed devices on the same iCloud account: commit a disposable save on one, launch the same title on the other, then repeat in reverse. Verify an offline/conflict run before enabling this for existing saves. This does not cover third-party engines that bypass the native save mounts.
+
 ### The cloud saves folder
 
 The folder a Mac app's save is synced through ([Cloud saves](settings.md#cloud-saves)) is not a row of the settings list, since a folder is none of its kinds. It has a key of its own in the same store: `cloudSaves.folder`, a string with the folder's absolute path (`defaults write org.nxnative.<title ID> cloudSaves.folder "$HOME/Library/Mobile Documents/com~apple~CloudDocs/My Saves"`). Remove the key, or write an empty string, to turn cloud saves off. The app's settings window shows and changes the same key, so the player sees the folder a front end chose.

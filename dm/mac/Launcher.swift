@@ -84,19 +84,27 @@ struct CloudSavesSection: View {
     }()
 
     var body: some View {
-        Section {
-            LabeledContent("Cloud saves") {
-                Text(fixed.map { "\(Self.shown($0)) (env.txt)" } ?? (folder.isEmpty ? "Off" : Self.shown(folder)))
-                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+        if Bundle.main.object(forInfoDictionaryKey: "DMCloudSaveContainer") is String {
+            Section {
+                LabeledContent("iCloud saves", value: "Automatic")
+            } footer: {
+                Text("Use the same iCloud account on all your devices. The game reads your save when it starts and syncs after each save.")
             }
-            if fixed == nil {
-                HStack {
-                    Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose)
-                    if !folder.isEmpty { Button("Turn off") { folder = "" } }
+        } else {
+            Section {
+                LabeledContent("Cloud saves") {
+                    Text(fixed.map { "\(Self.shown($0)) (env.txt)" } ?? (folder.isEmpty ? "Off" : Self.shown(folder)))
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
                 }
+                if fixed == nil {
+                    HStack {
+                        Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose)
+                        if !folder.isEmpty { Button("Turn off") { folder = "" } }
+                    }
+                }
+            } footer: {
+                Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
             }
-        } footer: {
-            Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
         }
     }
 

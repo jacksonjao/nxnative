@@ -13,6 +13,7 @@
 #include "game_profile.h"
 #include "dm.h"
 #include "front.h"
+#include "save_sync.h"
 #import "romfs_patch.h"
 
 UIViewController *front_tv_root(void);
@@ -270,6 +271,23 @@ static void boot(void) {
     self.window.rootViewController = front_tv_root(); [self.window makeKeyAndVisible];
 }
 - (void)sceneWillResignActive:(UIScene *)scene { front_tv_focus(0); }
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+    if (!host_started) return;
+    UIApplication *app = UIApplication.sharedApplication;
+    __block UIBackgroundTaskIdentifier task = UIBackgroundTaskInvalid;
+    void (^end)(void) = ^{
+        if (task != UIBackgroundTaskInvalid) {
+            [app endBackgroundTask:task];
+            task = UIBackgroundTaskInvalid;
+        }
+    };
+    task = [app beginBackgroundTaskWithName:@"cloud save" expirationHandler:end];
+    if (task == UIBackgroundTaskInvalid) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        save_sync_flush(20000);
+        dispatch_async(dispatch_get_main_queue(), end);
+    });
+}
 - (void)sceneDidBecomeActive:(UIScene *)scene { front_tv_focus(1); }
 @end
 @interface TVApp : UIResponder <UIApplicationDelegate>

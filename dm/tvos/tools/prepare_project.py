@@ -63,6 +63,8 @@ def main():
     bc2astc_link = gen / 'src' / 'gfx__tex__nvn_bc2astc.c'
     if bc2astc.is_file():
         replace_symlink(bc2astc_link, bc2astc)
+    # Frozen iOS preparations may predate the native cloud transport.
+    replace_symlink(gen / 'src' / 'host__save_cloudkit.m', tv.parent / 'host' / 'save_cloudkit.m')
     # Let ld own segment addresses, fixup indices and signing metadata. The
     # guest's own PC-relative references keep their original module offsets.
     original = (iosgen / 'embed.S').read_text()
@@ -99,7 +101,8 @@ def main():
         if line.startswith(('CODE_SIGN_ENTITLEMENTS', 'DM_XCODE_OUTPUT_ROOT', 'OTHER_LDFLAGS', 'DM_APPICON')):
             continue
         config.append(line)
-    config.append('OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS) -lz ' + ' '.join(flags))
+    cloudkit = [] if any(re.match(r'DM_FRAMEWORKS\s*=.*-framework CloudKit\b', line) for line in config) else ['-framework CloudKit']
+    config.append('OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS) -lz ' + ' '.join(cloudkit + flags))
     (gen / 'dm-tv.xcconfig').write_text('\n'.join(config) + '\n')
     from app_icon import create as create_icon
     icon = iosgen / 'Assets.xcassets/AppIcon.appiconset/icon.png'

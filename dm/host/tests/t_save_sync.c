@@ -14,6 +14,7 @@
 //   (10) the launcher's DM_SAVE with a trailing slash: the same <save>.sync as the host's
 #include "../hle_fs.c"
 #include <ctype.h>
+#include <limits.h>
 #include <sys/wait.h>
 #include <sys/time.h>
 
@@ -32,6 +33,30 @@ static void mkd(const char *p) { char c[1200]; snprintf(c, sizeof c, "%s", p); f
 static void set_mtime(const char *p, time_t t) { struct timeval tv[2] = {{t, 0}, {t, 0}}; utimes(p, tv); }
 static time_t mtime_of(const char *p) { struct stat st; return stat(p, &st) ? 0 : st.st_mtimespec.tv_sec; }
 static int exists(const char *p) { return !access(p, F_OK); }
+// A private database fixture exercises the native transport path without
+// touching a real iCloud account. Expected hashes model a concurrent writer.
+static const char *mock_db, *mock_account;
+static int mock_race;
+int front_cloudkit_configured(void) { return mock_db != NULL; }
+int front_cloudkit_account(char scope[33]) {
+    if (!mock_account) return 0;
+    memcpy(scope, mock_account, 33); return 1;
+}
+static void mock_path(char *dst, size_t n, const char *path) {
+    snprintf(dst, n, "%s/%s", mock_db, path);
+}
+int front_cloudkit_fetch(const char *path, const char *local) {
+    char src[PATH_MAX]; mock_path(src, sizeof src, path);
+    return front_save_sync_fetch(src, local);
+}
+int front_cloudkit_store(const char *local, const char *path, const char *expected) {
+    char dest[PATH_MAX], dir[PATH_MAX]; mock_path(dest, sizeof dest, path);
+    ss_meta old;
+    if (mock_race || (exists(dest) ? (ss_read(dest, NULL, &old) || strcmp(old.hash, expected)) : *expected)) return 0;
+    strlcpy(dir, dest, sizeof dir); *strrchr(dir, '/') = 0; mkd(dir);
+    return front_save_sync_store(local, dest);
+}
+
 
 // The newest backup of a save whose name ends in " <side>", "" when there is none
 static void backup_of(const char *save, const char *side, char *out, size_t n) {
@@ -217,6 +242,33 @@ int main(void) {
     snprintf(p, sizeof p, "%s/.sync", C); CHECK(!exists(p), "and the sync state is beside the save, not inside it");
     unsetenv("DM_SAVE_SYNC");
 
+    printf("(11) automatic private cloud saves\n");
+    const char *scope_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", *scope_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char db[1200], cloudA[1400], cloudB[1400], data[1400], peer[1200], local[1200];
+    snprintf(db, sizeof db, "%s/cloudkit", root); mock_db = db;
+    snprintf(cloudA, sizeof cloudA, "%s/cksave/%s/%s/save.dmsync", db, scope_a, id);
+    snprintf(cloudB, sizeof cloudB, "%s/cksave/%s/%s/save.dmsync", db, scope_b, id);
+    snprintf(local, sizeof local, "%s/native/save", root); mkd(local);
+    snprintf(peer, sizeof peer, "%s/peer/save", root); mkd(peer);
+    snprintf(data, sizeof data, "%s/game.dat", local); put(data, "initial"); set_mtime(data, 1700000000);
+    unsetenv("DM_SAVE_SYNC"); mock_account = scope_a;
+    CHECK(save_sync_after_exit(local, id) && cloud_has(cloudA, root, "game.dat", "initial"), "automatic sync uploads to the current account without a chosen folder");
+    mock_account = scope_b;
+    CHECK(save_sync_after_exit(local, id) && cloud_has(cloudB, root, "game.dat", "initial"), "a different account has separate sync state and a separate record");
+    mock_account = scope_a; put(data, "unsent"); set_mtime(data, 1700000010);
+    mock_race = 1;
+    CHECK(!save_sync_after_exit(local, id) && same(data, "unsent") && cloud_has(cloudA, root, "game.dat", "initial"), "a conditional write rejected by the database preserves the local save");
+    mock_race = 0;
+    char peer_file[1400]; snprintf(peer_file, sizeof peer_file, "%s/game.dat", peer);
+    put(peer_file, "newer"); set_mtime(peer_file, 1700000020);
+    CHECK(save_sync_after_exit(peer, id) && cloud_has(cloudA, root, "game.dat", "newer"), "another device can publish newer progress");
+    CHECK(!save_sync_after_exit(local, id) && same(data, "unsent") && cloud_has(cloudA, root, "game.dat", "newer"), "a stale local upload does not overwrite newer progress");
+    CHECK(session(local, NULL, NULL, NULL) == 0 && same(data, "newer"), "the next launch downloads the newer progress automatically");
+    backup_of(local, "local", back, sizeof back); snprintf(p, sizeof p, "%s/save/game.dat", back);
+    CHECK(*back && same(p, "unsent"), "the replaced local copy is backed up");
+    mock_account = NULL;
+    CHECK(!save_sync_after_exit(local, id) && same(data, "newer"), "iCloud account unavailable leaves the save local and reports that sync is pending");
+    mock_db = NULL;
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
     return fails != 0;

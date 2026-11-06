@@ -65,6 +65,8 @@ void dm_clear_cloud_saves(void) {
 }
 
 void dm_cloud_saves_env(void) {
+    // App-managed CloudKit builds never request access to a legacy folder.
+    if ([[NSBundle mainBundle] objectForInfoDictionaryKey:@"DMCloudSaveContainer"]) return;
     static BOOL fromPick;   // DM_SAVE_SYNC is the one this set, not an env file's
     if (getenv("DM_SAVE_SYNC") && !fromPick) return;
     BOOL stale = NO;

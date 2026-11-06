@@ -201,6 +201,12 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 ## Cloud saves
 
+A build signed for the shared iCloud container syncs supported games automatically on iPhone, iPad, Mac and Apple TV. Sign in to the same iCloud account on each device. The game checks for your save as it starts and sends committed progress in the background. Play can continue offline; pending progress is tried again after the next save, background flush, or launch. When two devices save separately, a replaced copy is backed up locally. If iCloud has a newer copy while a game is running, the game keeps the local session intact and checks again at the next launch.
+
+Automatic sync currently covers games that use the native host save mounts. Engines with separate save folders require a dedicated integration. Each title syncs its own progress; game files, shaders, and controller settings are local. An existing legacy-folder copy is not imported directly: start with the latest progress on the device that already has it.
+
+### Legacy folder sync
+
 The Mac app and the iPhone app of one game can share a save through iCloud Drive. Choose the same iCloud Drive folder on both: **Cloud saves** › **Choose a folder…** in the Mac settings window, and **Cloud saves** in the iPhone launcher (any folder, for instance one named **nxnative Saves**). Each game keeps one file there, `<title ID>/save.dmsync`, which holds the whole save.
 
 When the game starts, it brings the save from iCloud Drive in if that one is the one to keep; a few seconds after the game saves, it sends its save. The iPhone app also sends when it goes to the background, and the Mac app once the game has quit. If you played on both without the save getting across in between, the newer save wins.

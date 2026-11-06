@@ -45,3 +45,10 @@ int front_save_sync_fetch(const char *cloud, const char *local);
 int front_save_sync_store(const char *local, const char *cloud);
 // Clones the committed save folder `dir` to `to` while no Commit can swap it (hle_fs.c takes its lock; the default, with no host running, does not need one). 0 on success
 int dm_fs_clone_committed(const char *dir, const char *to);
+
+
+// Native private CloudKit transport, available only when configured in the signed app.
+int front_cloudkit_configured(void);
+int front_cloudkit_account(char scope[33]);
+int front_cloudkit_fetch(const char *path, const char *local);
+int front_cloudkit_store(const char *local, const char *path, const char *expected);

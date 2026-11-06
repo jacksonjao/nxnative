@@ -72,7 +72,7 @@ static void run_case(const char *save, const char *name, int open_error, int wri
     fail_open = open_error; fail_write = write_error; fail_close = close_error; fail_rename = rename_error;
     cleanup_errno = EBUSY; // Cleanup must not replace the original diagnostic.
     closes = renames = unlinks = 0; metadata_fd = -1; metadata = NULL; diagnostic[0] = 0;
-    write_base(save, new_hash);
+    write_base_at(save, "", new_hash);
     CHECK(closes == !open_error, "every opened stream is closed exactly once");
     if (!open_error) CHECK(fcntl(metadata_fd, F_GETFD) == -1 && errno == EBADF, "file descriptor is closed");
     CHECK(renames == !(open_error || write_error || close_error), "rename only follows successful write and close");
@@ -84,7 +84,7 @@ static void run_case(const char *save, const char *name, int open_error, int wri
     CHECK(access(temp, F_OK) == -1 && errno == ENOENT, "no temporary file remains");
     // Keep the failing implementation's leaked stream from affecting later cases.
     if (metadata) { fclose(metadata); metadata = NULL; }
-    read_base(save, hash);
+    read_base_at(save, "", hash);
     CHECK(!strcmp(hash, expected_errno ? old_hash : new_hash), "failed updates preserve previous metadata; success replaces it");
 }
 int main(void) {

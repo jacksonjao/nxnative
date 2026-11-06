@@ -262,12 +262,23 @@ _shellMask.frame=b;_shellMask.path=p.CGPath;_shellEdge.frame=b;_shellEdge.path=p
 }
 - (void)close{[self dismissViewControllerAnimated:YES completion:nil];}
 - (void)resetChoices{for(NSDictionary *spec in libraryPreferences())[NSUserDefaults.standardUserDefaults removeObjectForKey:libraryPreferenceKey(spec[@"key"])];[self.tableView reloadData];}
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView{(void)tableView;return 1;}
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section{(void)tableView;(void)section;return libraryPreferences().count;}
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView{
+    (void)tableView;
+    NSString *container=[NSBundle.mainBundle objectForInfoDictionaryKey:@"DMCloudSaveContainer"];
+    return [container isKindOfClass:NSString.class]&&[container hasPrefix:@"iCloud."]?2:1;
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section{(void)tableView;return section==1?1:libraryPreferences().count;}
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section{
-    (void)tableView;(void)section;return @"这些设置会在下次打开游戏时生效。游戏不支持的选项会保持该游戏原来的设置；游戏语言优先使用游戏自带的中文。不限制会取消宿主限帧；游戏内置限帧与固定步长仍需逐款适配，实际帧率取决于设备性能。";
+    (void)tableView;
+    if(section==1)return @"各设备使用同一个 iCloud 账号。支持同步的游戏在启动时读取进度，在游戏内保存后自动上传。";
+    return @"这些设置会在下次打开游戏时生效。游戏不支持的选项会保持该游戏原来的设置；游戏语言优先使用游戏自带的中文。不限制会取消宿主限帧；游戏内置限帧与固定步长仍需逐款适配，实际帧率取决于设备性能。";
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath{
+    if(indexPath.section==1){
+        UITableViewCell *cloud=[[UITableViewCell alloc]initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+        cloud.textLabel.text=@"iCloud 存档";cloud.detailTextLabel.text=@"自动同步";
+        cloud.selectionStyle=UITableViewCellSelectionStyleNone;return cloud;
+    }
     UITableViewCell *cell=[tableView dequeueReusableCellWithIdentifier:@"choice"];
     if(!cell)cell=[[UITableViewCell alloc]initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"choice"];
     NSDictionary *spec=libraryPreferences()[indexPath.row];
@@ -278,6 +289,7 @@ _shellMask.frame=b;_shellMask.path=p.CGPath;_shellEdge.frame=b;_shellEdge.path=p
     return cell;
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath{
+    if(indexPath.section==1)return;
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     NSDictionary *spec=libraryPreferences()[indexPath.row];
     UIAlertController *sheet=[UIAlertController alertControllerWithTitle:spec[@"title"] message:nil preferredStyle:UIAlertControllerStyleAlert];

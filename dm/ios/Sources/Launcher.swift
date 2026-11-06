@@ -25,37 +25,45 @@ private struct CloudSavesSection: View {
     @State private var picking = false
 
     var body: some View {
-        Section {
-            HStack {
-                Text("云存档")
-                Spacer()
-                Text(folder.isEmpty ? "关闭" : (folder as NSString).lastPathComponent)
-                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        if Bundle.main.object(forInfoDictionaryKey: "DMCloudSaveContainer") is String {
+            Section {
+                LabeledContent("iCloud 存档", value: "自动同步")
+            } footer: {
+                Text("各设备使用同一 iCloud 账号。进入游戏时读取存档，保存后自动同步。")
             }
-            Button(folder.isEmpty ? "选择 iCloud 云盘文件夹…" : "选择其他文件夹…") { picking = true }
-                // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
-                .sheet(isPresented: $picking) {
-                    DocumentPicker(types: [.folder]) { url in
-                        picking = false
-                        if dm_store_cloud_saves(url) {
-                            note = "已保存。开始游戏后将使用此文件夹。"
-                            refresh()
-                        } else {
-                            note = "无法保存此文件夹，请选择其他文件夹。"
-                        }
-                    } onCancel: { picking = false }
+        } else {
+            Section {
+                HStack {
+                    Text("云存档")
+                    Spacer()
+                    Text(folder.isEmpty ? "关闭" : (folder as NSString).lastPathComponent)
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
-            if !folder.isEmpty {
-                Button("关闭云存档", role: .destructive) {
-                    dm_clear_cloud_saves(); refresh(); note = ""
+                Button(folder.isEmpty ? "选择 iCloud 云盘文件夹…" : "选择其他文件夹…") { picking = true }
+                    // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
+                    .sheet(isPresented: $picking) {
+                        DocumentPicker(types: [.folder]) { url in
+                            picking = false
+                            if dm_store_cloud_saves(url) {
+                                note = "已保存。开始游戏后将使用此文件夹。"
+                                refresh()
+                            } else {
+                                note = "无法保存此文件夹，请选择其他文件夹。"
+                            }
+                        } onCancel: { picking = false }
+                    }
+                if !folder.isEmpty {
+                    Button("关闭云存档", role: .destructive) {
+                        dm_clear_cloud_saves(); refresh(); note = ""
+                    }
                 }
+            } footer: {
+                Text(note.isEmpty
+                     ? "请选择 iCloud 云盘文件夹，并在 Mac 端选择同一文件夹。游戏启动时读取云存档，保存后同步；被替换的存档保留在 save-backups 中。"
+                     : note)
             }
-        } footer: {
-            Text(note.isEmpty
-                 ? "请选择 iCloud 云盘文件夹，并在 Mac 端选择同一文件夹。游戏启动时读取云存档，保存后同步；被替换的存档保留在 save-backups 中。"
-                 : note)
+            .onAppear(perform: refresh)
         }
-        .onAppear(perform: refresh)
     }
 
     private func refresh() {
