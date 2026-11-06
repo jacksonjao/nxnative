@@ -1,6 +1,7 @@
 // Direct GL imports and eglGetProcAddress must reach the same implementations (issue #228), including big-stack entries.
 #include "../gl/hle_gl.m"
 #include <assert.h>
+#include <mach-o/ldsyms.h>
 #include "../nvn/nvn_protos.h"
 
 uint64_t resolve_import(module_t *m, const char *name);

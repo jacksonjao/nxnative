@@ -101,11 +101,22 @@ run: $(B)/t_fs_redirect $(B)/t_map_headroom za-timing audio-recovery $(B)/t_lang
 	$(B)/t_symbols
 run: $(B)/t_nro
 run: $(B)/t_symbols
-$(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../host_image.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols
 symbols: $(B)/t_symbols
 	$(B)/t_symbols
+
+.PHONY: host-image
+host-image: $(B)/t_host_image $(B)/t_host_image_a.dylib $(B)/t_host_image_b.dylib
+	$(B)/t_host_image $(B)/t_host_image_a.dylib $(B)/t_host_image_b.dylib
+run: host-image
+$(B)/t_host_image: t_host_image.c ../host_image.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -o $@ $<
+$(B)/t_host_image_a.dylib: t_host_image.c ../host_image.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -dynamiclib -DHOST_IMAGE_SENTINEL=21 -o $@ $<
+$(B)/t_host_image_b.dylib: t_host_image.c ../host_image.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -dynamiclib -DHOST_IMAGE_SENTINEL=22 -o $@ $<
 run: $(B)/t_system_event
 run: $(B)/t_audren_work
 $(B)/t_audren_work: t_audren_work.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)

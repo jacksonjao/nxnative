@@ -8,7 +8,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
+#include "host_image.h"
 #include "hle.h"
 #include "loader_image.h"
 
@@ -177,7 +177,7 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
 static void force_init(void) {
-    unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+    unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(DM_HOST_IMAGE, "__DATA", "swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
@@ -542,7 +542,7 @@ void loader_hash_log(void) {
 // inside __TEXT.  Only the hole is replaced with a writable copy-on-write
 // mapping; the code stays in dyld's original signed executable mapping.
 #include <mach/mach.h>
-#define IMAGE_MH ((const struct mach_header_64 *)(g_module_image_mh ? g_module_image_mh : (const void *)&_mh_execute_header))
+#define IMAGE_MH ((const struct mach_header_64 *)(g_module_image_mh ? g_module_image_mh : (const void *)DM_HOST_IMAGE))
 // The NRO modules (loader.c "NRO modules") are packed instead of getting sections of their own: a Mach-O file has at most 255 sections, and Super Smash Bros. Ultimate's 98 NROs would
 // take 294. gen_embed.py puts their pieces one after another, each 16K aligned, in __TEXT,__dm_nro_x0 / __DM_NRO_W,__img / __TEXT,__dm_nro_x1, and __DATA,__dm_nro_tab lists them:
 // 32 bytes of name, then the offset and length of its x0, W and x1 pieces in their sections (u64 each). A module name never holds an underscore, so these names meet no module's

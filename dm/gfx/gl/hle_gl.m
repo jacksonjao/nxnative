@@ -26,7 +26,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
 #include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
+#include "../../host/host_image.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -2239,7 +2239,7 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
 // table as direct imports. Unknown names remain null (not generic stubs).
 static void *gl_lookup(const char *name) {
     static const hle_ent *sec; static unsigned long sz;
-    if (!sec) sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
+    if (!sec) sec = (const hle_ent *)getsectiondata(DM_HOST_IMAGE, "__DATA", "swhle", &sz);
     for (unsigned long i = 0; i < sz / sizeof *sec; i++) if (!strcmp(sec[i].name, name)) return sec[i].fn;
     return NULL;
 }
