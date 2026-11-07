@@ -78,3 +78,7 @@ checked before using the fallback; native PC ports stay on their own paths.
 Handheld mode is named as such because it does not promise 720p. The patch was
 compiled and linked into the candidate mixed-engine shell; install and
 gameplay validation are pending.
+
+The same patch exposes the existing 3D render scale for Tears of the Kingdom
+and the existing dynamic-resolution switch for NieR. The fallback only shows
+these controls if the signed framework advertises the respective fixup.

@@ -1,6 +1,6 @@
 --- a/GameSettings.h
 +++ b/GameSettings.h
-@@ -30,12 +30,19 @@
+@@ -30,12 +30,30 @@
  static NSDictionary *TTChoice(NSString *env,NSString *label,NSString *def,NSArray *options){
      return @{@"env":env,@"label":label,@"default":def,@"kind":@"choice",@"section":@"Game",@"options":options};
  }
@@ -8,23 +8,43 @@
 -// that did not ship a launcher schema.
 +// Signed Switch frameworks can arrive with a data-only import and no
 +// launcher.json. Both controls are implemented by the native host.
-+static BOOL TTIsSignedSwitchTitle(NSString *title){
++static NSString *TTNativeSwitchFramework(NSString *title){
 +    NSString *upper=title.uppercaseString;
-+    if(upper.length!=16||(![upper hasPrefix:@"01"]&&![upper hasPrefix:@"04"]))return NO;
-+    if([upper rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789ABCDEF"] invertedSet]].location!=NSNotFound)return NO;
-+    NSString *name=[NSString stringWithFormat:@"DmGame%@.framework/DmGame",upper];
-+    return [NSFileManager.defaultManager fileExistsAtPath:[NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:name]];
++    if(upper.length!=16||(![upper hasPrefix:@"01"]&&![upper hasPrefix:@"04"]))return nil;
++    if([upper rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789ABCDEF"] invertedSet]].location!=NSNotFound)return nil;
++    NSString *name=[NSString stringWithFormat:@"DmGame%@.framework",upper];
++    NSString *framework=[NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:name];
++    return [NSFileManager.defaultManager fileExistsAtPath:[framework stringByAppendingPathComponent:@"DmGame"]]?framework:nil;
 +}
  static NSDictionary *TTNativeGraphicsSetting(NSString *title,NSString *key){
 -    if(![title.lowercaseString isEqual:@"0400c3f00006e000"])return nil;
 -    if([key isEqual:@"DM_OPMODE"])return TTChoice(key,@"运行模式",@"1",@[@[@"0",@"掌机（720p 档）"],@[@"1",@"底座（1080p 档）"]]);
 -    if([key isEqual:@"DM_PRESENT_UPSCALE"])return TTChoice(key,@"画面超分",@"off",@[@[@"off",@"关闭"],@[@"metalfx",@"MetalFX"]]);
-+    if(!TTIsSignedSwitchTitle(title))return nil;
++    NSString *framework=TTNativeSwitchFramework(title);
++    if(!framework)return nil;
 +    if([key isEqual:@"DM_OPMODE"])return TTChoice(key,@"运行模式",@"0",@[@[@"0",@"掌机"],@[@"1",@"底座"]]);
 +    if([key isEqual:@"DM_PRESENT_UPSCALE"])return TTChoice(key,@"画面超分",@"metalfx",@[@[@"off",@"关闭"],@[@"metalfx",@"MetalFX"]]);
++    if(![@[@"DM_RENDER_SCALE",@"DM_DYNAMIC_RESOLUTION"] containsObject:key])return nil;
++    NSString *fixups=[NSString stringWithContentsOfFile:[framework stringByAppendingPathComponent:@"dm/main.fixups.tsv"]
++                                               encoding:NSUTF8StringEncoding error:nil];
++    if([key isEqual:@"DM_RENDER_SCALE"]&&[title.lowercaseString isEqual:@"0100f2c0115b6000"]&&
++       [fixups containsString:@"\n# RENDER_SCALE\t1\n"])
++        return @{@"env":key,@"label":@"3D 渲染比例",@"kind":@"range",@"section":@"Game",@"default":@"0.75",@"min":@0.50,@"max":@1.00,@"step":@0.05};
++    if([key isEqual:@"DM_DYNAMIC_RESOLUTION"]&&[title.lowercaseString isEqual:@"0100b8e016f76000"]&&
++       [fixups containsString:@"\n# DYNAMIC_RESOLUTION\t1\n"])
++        return @{@"env":key,@"label":@"动态分辨率",@"kind":@"toggle",@"section":@"Game",@"default":@"1",@"on":@"1",@"off":@"0"};
      return nil;
  }
  static NSArray *TTGTASettingSpecs(void){
+@@ -70,7 +88,7 @@
+             if(![@[@"DM_PRESENT_ASPECT",@"DM_TOUCH_SIZE",@"DM_TOUCH_STICK"] containsObject:row[@"env"]])[out addObject:row];
+         }break;
+     }
+-    for(NSString *key in @[@"DM_OPMODE",@"DM_PRESENT_UPSCALE"]){
++    for(NSString *key in @[@"DM_OPMODE",@"DM_PRESENT_UPSCALE",@"DM_RENDER_SCALE",@"DM_DYNAMIC_RESOLUTION"]){
+         NSDictionary *native=TTNativeGraphicsSetting(title,key);
+         if(!native)continue;
+         BOOL hasSetting=NO;
 --- a/main.m
 +++ b/main.m
 @@ -109,7 +109,7 @@
