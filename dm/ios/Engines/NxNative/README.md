@@ -21,3 +21,24 @@ whose host lacks file-backed guest memory. Source SHA-256 before patching:
 
 - `dm/host/hle_svc.c`: `51f35785f230a7c3727f9f4ab7e4b839cd5633ff6c368e9a1b80a2e6dca50044`
 - `dm/gfx/nvn/nvn_mtl.m`: `2e311373518793777787f96d233c748a8fbb0fca8a17d3bc8d68e172d02ae40c`
+
+## Ocarina of Time: opening movie on Metal 3 (M2 60.60)
+
+The opening video's decode kernel writes a private RGBA8 target which the
+legacy path created without shader-write usage. Promote the exact decoder
+output before encoding its dispatch. Scale that decoded frame into the
+original movie destination and omit the matched 13 reconstruction dispatches
+only when the replacement render pass was successfully encoded. Other
+sequences retain the ordinary path. The independent engine keeps shader chain
+`70fa6008c58d`; all six guest sections and its sealed shader companions are
+byte-identical.
+
+The installed M2 build was checked against the same opening. The opening
+video is now visible; GPU median over the first reported 300 frames was
+1.93 ms versus 76.50 ms on the preceding build. This does not establish 3D
+gameplay performance or completeness.
+
+Apply `ocarina-m2-opening-movie.patch` to the pinned 60.57 Ocarina Metal 3
+renderer. Source SHA-256 before patching:
+
+- `dm/gfx/nvn/nvn_mtl_legacy.inc`: `4a5bf9dfb5e825d1ac9e1122c7a53fdd841346a0d47f88ae54100accafcc0c4a`

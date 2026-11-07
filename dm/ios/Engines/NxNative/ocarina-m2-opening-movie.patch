@@ -1,0 +1,214 @@
+--- a/dm/gfx/nvn/nvn_mtl_legacy.inc
++++ b/dm/gfx/nvn/nvn_mtl_legacy.inc
+@@ -930,7 +930,12 @@
+ static int g_ruler_truth = -1, g_ruler_pending;
+ static int tbdr_on(void);
+ 
++// The image is valid only within the submit that decoded it.
++static id<MTLTexture> g_oot_movie_decoded;
++static const uint8_t *g_oot_movie_skip_end;
+ void mtl_sub_begin(void) {
++    g_oot_movie_decoded = nil;
++    g_oot_movie_skip_end = NULL;
+     mtl_init(); g_sub_serial++; g_rc_npend = 0; g_rc_skip = 0;
+     if (tbdr_on() == 0 && g_ruler_pending) { g_ruler_truth = 0; g_ruler_pending = 0; MLOG("DM_NVN_RULER：切到被测模式"); }
+     defer_drain();
+@@ -1714,12 +1719,12 @@
+ }
+ // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
+ // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
+-static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf) {
++static id<MTLTexture> tex_upgrade_usage(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf, MTLTextureUsage usage) {
+     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+     d.textureType = base.textureType; d.pixelFormat = base.pixelFormat; d.width = base.width; d.height = base.height; d.depth = base.depth;   // Keep the original format, only add the format-view usage
+     d.arrayLength = base.arrayLength; d.mipmapLevelCount = base.mipmapLevelCount; d.sampleCount = base.sampleCount;
+     d.storageMode = base.storageMode; d.cpuCacheMode = base.cpuCacheMode; d.hazardTrackingMode = base.hazardTrackingMode;
+-    d.resourceOptions = base.resourceOptions; d.usage = base.usage | MTLTextureUsagePixelFormatView;
++    d.resourceOptions = base.resourceOptions; d.usage = base.usage | usage;
+     id<MTLTexture> upgraded = [g_dev newTextureWithDescriptor:d];
+     if (!upgraded) { RED_ONCE(45, "贴图升级失败 ser=%llu 格式 %lu → %lu", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf); return base; }
+     tex_tag_format(upgraded, t->d.format);
+@@ -1742,6 +1747,9 @@
+     }
+     MLOG("贴图升级为可换格式视图 ser=%llu 基格式 %lu → 视图格式 %lu（升级次数=%llu）", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, ++g_pfv_upgrades);
+     return upgraded;
++}
++static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat pf) {
++    return tex_upgrade_usage(t, base, pf, MTLTextureUsagePixelFormatView);
+ }
+ // Packaged texture upload: first set read-only, then take the stamp, then read the pool memory and deswizzle into a staging buffer, and blit into a new private texture.
+ // Batching: uploads within one replay submission share one upload command buffer (compute encoder deswizzle + a unified blit), flushed before the replay command buffer is committed;
+@@ -8718,12 +8726,140 @@
+     }
+     return ps;
+ }
+-static void dispatch(const p_dispatch *dp) {
++
++static int oot_movie_direct_on(void) {
++    static int enable = -1;
++    if (enable < 0) {
++        const char *e = getenv("DM_NVN_NDVE_MOVIE_DIRECT");
++        enable = DM_GAME_PROGRAM_ID == 0x0400486024DEC000ull && (!e || strcmp(e, "0"));
++    }
++    return enable;
++}
++static id<MTLTexture> oot_movie_image(NvShader *cs, unsigned slot, uint64_t handle, uint64_t *serial, bool promote) {
++    bool found = false;
++    for (int i = 0; i < cs->rf.nb; ++i) {
++        const nvn_rbind *b = &cs->rf.b[i];
++        if (b->kind == NVN_RB_IMG && b->reg == slot && b->rw) { found = true; break; }
++    }
++    int tid = (int)(handle & 0xfffff);
++    if (!found || !tid) return nil;
++    pthread_mutex_lock(&g_rmu);
++    id<MTLTexture> t = nil;
++    if (tid < g_ntreg && g_treg[tid].ok) {
++        t = tex_by_id(tid);
++        const tex_t *tt = &g_treg[tid].t;
++        if (promote && t && !(t.usage & MTLTextureUsageShaderWrite) && !t.parentTexture && !t.buffer &&
++            t.width == 1920 && t.height == 1080 && t.textureType == MTLTextureType2D &&
++            t.pixelFormat == MTLPixelFormatRGBA8Unorm && t.sampleCount == 1 && t.mipmapLevelCount == 1 &&
++            t.storageMode == MTLStorageModePrivate && (t.usage & MTLTextureUsageRenderTarget) &&
++            !tt->has_layout && !tex_cpu_written(tt->serial)) {
++            id<MTLTexture> upgraded = tex_upgrade_usage(tt, t, t.pixelFormat, MTLTextureUsageShaderWrite);
++            if (upgraded != t) {
++                t = tex_by_id(tid);
++                static unsigned promoted;
++                if (t == upgraded && promoted++ < 4)
++                    MLOG("M2 Ocarina NDVE: promoted decoder output %d to shader-write", tid);
++            }
++        }
++        if (serial) *serial = tt->serial;
++    }
++    pthread_mutex_unlock(&g_rmu);
++    if (t.textureType != MTLTextureType2D || t.pixelFormat != MTLPixelFormatRGBA8Unorm || t.sampleCount != 1) return nil;
++    return t;
++}
++static int copy_t2t_draw(id<MTLTexture>, id<MTLTexture>, unsigned, unsigned, unsigned, unsigned,
++                         const NVNcopyRegion *, const NVNcopyRegion *, int, int);
++static int oot_movie_direct_draw(NvShader *cs, uint64_t dst) {
++    id<MTLTexture> in = g_oot_movie_decoded;
++    if (!in) return 0;
++    uint64_t serial = 0;
++    id<MTLTexture> out = oot_movie_image(cs, 1, dst, &serial, false);
++    if (in.width != 1920 || in.height != 1080 || out.width != 2560 || out.height != 1440 ||
++        in == out || !serial || !(out.usage & MTLTextureUsageRenderTarget)) return 0;
++    rp_flush();
++    const NVNcopyRegion r0 = {0, 0, 0, 1920, 1080, 1}, r1 = {0, 0, 0, 2560, 1440, 1};
++    if (!copy_t2t_draw(in, out, 0, 0, 0, 0, &r0, &r1, 1, 0)) return 0;
++    zskip_del(serial);
++    gpu_tex_mark(serial);
++    args_dirty_all();
++    g_oot_movie_decoded = nil;
++    static int once;
++    if (!once++) MLOG("M2 Ocarina NDVE: scaled the decoded RGBA frame directly");
++    return 1;
++}
++// Preserve all bindings and barriers. Drop only the captured, contiguous
++// reconstruction sequence, only after its final output is encoded.
++static void oot_movie_chain(const uint8_t *p) {
++    static const char *const keys[] = {
++        "ba079f68ae288dba_b", "a8b4fb48fee0ccf8_b", "e2eebd7ba18fe35f_b",
++        "e6be82d835fbe4d3_b", "9442573ee4ace011_b", "0a56002cdc7e1fce_b",
++        "0a56002cdc7e1fce_b", "d15370a382630d4e_b", "e6be82d835fbe4d3_b",
++        "7f7ff0f36b54d90f_b", "a8b4fb48fee0ccf8_b", "5a7d69b067a7f011_b",
++        "4f41ccf24f163e0d_b",
++    };
++    if (!g_oot_movie_decoded) return;
++    uint64_t dst = S.img[5][1];
++    NvShader *cs = nil;
++    unsigned index = 0;
++    for (int count = 0; count < 128; ++count) {
++        op_hdr h;
++        memcpy(&h, p, sizeof h);
++        if (h.size < sizeof h || h.size > 65536) return;
++        const void *a = p + sizeof h;
++        switch (h.op) {
++            case OP_BIND_PROGRAM: {
++                if (h.size < sizeof h + sizeof(p_bind_program)) return;
++                const p_bind_program *b = a;
++                if (b->stages != 0x20 || !b->prog) return;
++                NvProg *pr = prog_get(b->prog);
++                cs = pr ? pr->sh[5] : nil;
++                break;
++            }
++            case OP_BIND_IMG: {
++                if (h.size < sizeof h + offsetof(p_bind_handles, h)) return;
++                const p_bind_handles *b = a;
++                if (b->stage != 5 || b->defer || b->first < 0 || b->n <= 0 ||
++                    b->first >= 32 || b->n > 32 - b->first ||
++                    h.size < sizeof h + offsetof(p_bind_handles, h) + sizeof(b->h[0]) * b->n) return;
++                if (b->first <= 1 && b->first + b->n > 1) dst = b->h[1 - b->first];
++                break;
++            }
++            case OP_BIND_SSBO: case OP_BIND_UBO: case OP_BIND_UBO_SMALL:
++            case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP:
++            case OP_PUSH_CONST: case OP_BARRIER: break;
++            case OP_DISPATCH: {
++                if (h.size < sizeof h + sizeof(p_dispatch)) return;
++                const p_dispatch *d = a;
++                if (d->ind || d->x <= 0 || d->y <= 0 || d->z != 1 || !cs ||
++                    strcmp(cs->key, keys[index])) return;
++                if (++index != sizeof keys / sizeof keys[0]) break;
++                if (oot_movie_direct_draw(cs, dst)) {
++                    g_oot_movie_skip_end = p;
++                    static int once;
++                    if (!once++) MLOG("M2 Ocarina NDVE: skipped %u verified reconstruction dispatches", index);
++                }
++                return;
++            }
++            default: return; // Including END, JUMP, CALL and submit boundaries.
++        }
++        p += h.size;
++    }
++}
++
++static void dispatch(const p_dispatch *dp, const uint8_t *next) {
+     zskip_clear();
+     if (!S.cprog) { RED_ONCE(27, "compute dispatch has no bound program"); return; }
+     NvProg *pr = prog_get(S.cprog);
+     NvShader *cs = pr->sh[5];
+     if (!cs) { RED_ONCE(28, "dispatched program has no mapped compute shader"); return; }
++    int movie = oot_movie_direct_on() && !dp->ind && dp->x > 0 && dp->y > 0 && dp->z == 1;
++    int decoded = movie && !strcmp(cs->key, "49dff010b9832251_b");
++    if (decoded) {
++        g_oot_movie_decoded = nil;
++        oot_movie_image(cs, 0, S.img[5][0], NULL, true);
++    }
++    if (movie && !strcmp(cs->key, "4f41ccf24f163e0d_b") &&
++        oot_movie_direct_draw(cs, S.img[5][1])) return;
+     int min_cs = min_reduction_candidate(cs);
+     id<MTLComputePipelineState> ps = min_cs ? nil : compute_pipeline(cs, cs->fn);
+     if (!min_cs && !ps) return;
+@@ -8778,6 +8914,17 @@
+     enc_c_end(ce);
+     compute_atomic_finish(cs);
+     bright_lut(cs);   // 3D picture brightening: rewrite after the game finishes computing the color lookup table
++    if (decoded) {
++        id<MTLTexture> t = oot_movie_image(cs, 0, S.img[5][0], NULL, false);
++        if (t.width == 1920 && t.height == 1080 && (t.usage & MTLTextureUsageShaderWrite)) {
++            g_oot_movie_decoded = t;
++            oot_movie_chain(next);
++        } else {
++            static int once;
++            if (!once++) MLOG("M2 Ocarina NDVE: decoded image unavailable (format %lu usage %#lx %lux%lu)",
++                (unsigned long)t.pixelFormat, (unsigned long)t.usage, (unsigned long)t.width, (unsigned long)t.height);
++        }
++    }
+ }
+ // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)
+ static void copy_t2b(const p_copy_b2t *c) {
+@@ -9631,7 +9778,12 @@
+             case OP_COPY_T2B: copy_t2b(a); break;
+             case OP_COPY_T2T: copy_t2t(a); break;
+             case OP_CLEAR_TEX: clear_tex(a); break;
+-            case OP_DISPATCH: dispatch(a); break;
++            case OP_DISPATCH:
++                if (g_oot_movie_skip_end) {
++                    if (p == g_oot_movie_skip_end) g_oot_movie_skip_end = NULL;
++                    break;
++                }
++                dispatch(a, p + h.size); break;
+             case OP_BARRIER: {
+                 int32_t bits; memcpy(&bits, a, 4);
+                 if (bits) {
