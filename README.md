@@ -20,6 +20,13 @@ build is not a gameplay pass. Keep earlier observations in the
 [device history](docs/fork-status.md) and exact backports in the
 [engine notes](dm/ios/Engines/NxNative/README.md).
 
+Air build 60.61 defaults compatible native Switch games to handheld mode and
+MetalFX spatial upscaling, with a per-game override. Handheld mode leaves the
+render size to each game. The compatibility renderer now also has a classic
+MetalFX path: local GPU validation covered both 1280×720 and 960×540 input,
+including color and aspect-ratio bars. Deployment and game-by-game validation
+of that renderer on iPad are pending.
+
 | Game | What this fork changed | Verified result and open issues |
 | --- | --- | --- |
 | Mario Kart World | Restored movie texture views, terrain uploads and sparse mappings; fixed black scenery with conditional clears; reduced upload and pipeline work; restored Air's 60 Hz pacing ([movie](https://github.com/widmonstertony/nxnative/commit/3d0a3a0), [clears](https://github.com/widmonstertony/nxnative/commit/381ed5f), [upload cache](https://github.com/widmonstertony/nxnative/commit/e221694), [pacing](https://github.com/widmonstertony/nxnative/commit/e847a4c)) | Air player confirmed the black scenery was gone, but reported low race performance and intermittent race-entry crashes. Air logs still show 1080p input to MetalFX even in handheld mode. On M2, free roam rendered in a prior test; mesh faults and race performance remain open. |

@@ -1,6 +1,7 @@
 // iOS 17 traditional Metal backend, ported from D2R compatibility mechanisms.
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <objc/runtime.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
@@ -4502,13 +4503,13 @@ static void state_reset(void) {
 // Other mismatches (integer input with a normalized / half format, float input with an integer format) cannot keep the bit pattern: report once and keep the format.
 static MTLVertexFormat vfmt_for_ct(MTLVertexFormat f, int ct, int nvn_fmt) {
     static const MTLVertexFormat U[] = { MTLVertexFormatUChar, MTLVertexFormatUChar2, MTLVertexFormatUChar3, MTLVertexFormatUChar4, MTLVertexFormatUShort, MTLVertexFormatUShort2, MTLVertexFormatUShort3, MTLVertexFormatUShort4, MTLVertexFormatUInt, MTLVertexFormatUInt2, MTLVertexFormatUInt3, MTLVertexFormatUInt4 };
-    static const MTLVertexFormat I[] = { MTLVertexFormatChar, MTLVertexFormatChar2, MTLVertexFormatChar3, MTLVertexFormatChar4, MTLVertexFormatShort, MTLVertexFormatShort2, MTLVertexFormatShort3, MTLVertexFormatShort4, MTLVertexFormatInt, MTLVertexFormatInt2, MTLVertexFormatInt3, MTLVertexFormatInt4 };
+    static const MTLVertexFormat signed_formats[] = { MTLVertexFormatChar, MTLVertexFormatChar2, MTLVertexFormatChar3, MTLVertexFormatChar4, MTLVertexFormatShort, MTLVertexFormatShort2, MTLVertexFormatShort3, MTLVertexFormatShort4, MTLVertexFormatInt, MTLVertexFormatInt2, MTLVertexFormatInt3, MTLVertexFormatInt4 };
     static const MTLVertexFormat F[] = { MTLVertexFormatFloat, MTLVertexFormatFloat2, MTLVertexFormatFloat3, MTLVertexFormatFloat4 };
     int iu = -1, ii = -1, iff = -1;
-    for (int i = 0; i < 12; i++) { if (U[i] == f) iu = i; if (I[i] == f) ii = i; }
+    for (int i = 0; i < 12; i++) { if (U[i] == f) iu = i; if (signed_formats[i] == f) ii = i; }
     for (int i = 0; i < 4; i++) if (F[i] == f) iff = i;
     if (ct == NVN_CT_UINT) { if (iu >= 0) return f; if (ii >= 0) return U[ii]; if (iff >= 0) return U[8 + iff]; }
-    else if (ct == NVN_CT_INT) { if (ii >= 0) return f; if (iu >= 0) return I[iu]; if (iff >= 0) return I[8 + iff]; }
+    else if (ct == NVN_CT_INT) { if (ii >= 0) return f; if (iu >= 0) return signed_formats[iu]; if (iff >= 0) return signed_formats[8 + iff]; }
     else { if (iu < 0 && ii < 0) return f; }
     RED_ONCE(66, "顶点属性格式 %#x 与着色器输入类型 %s 对不上，位模式保不住（照原格式）", nvn_fmt, ct == NVN_CT_UINT ? "uint" : ct == NVN_CT_INT ? "int" : "float");
     return f;
@@ -4751,7 +4752,7 @@ static id<MTLFunction> nonpoint_offline_function(NvShader *vs, NSString *key,
         id decoded = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         if ([decoded isKindOfClass:[NSDictionary class]]) manifest = decoded;
     });
-    if (![manifest[@"schema"] isEqual:@1] || ![manifest[@"chain"] isEqual:@(TONTON_SHADER_CHAIN)]) return nil;
+    if (![manifest[@"schema"] isEqual:@1] || ![manifest[@"chain"] isEqual:@DMSH_CHAIN]) return nil;
     id entries = manifest[@"shaders"];
     if (![entries isKindOfClass:[NSDictionary class]]) return nil;
     id row = entries[key];
@@ -9801,6 +9802,70 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     [en endEncoding];
     return 1;
 }
+// Live presents encode on one thread and one classic Metal queue. The scaler's
+// tracked private textures can be reused in queue order without a CPU wait.
+static id<MTLTexture> legacy_present_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> raw,
+                                            MTLOrigin origin, MTLSize size, MTLViewport vp,
+                                            MTLPixelFormat output_format) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("DM_PRESENT_UPSCALE");
+        int requested = e && (!strcmp(e, "metalfx") || !strcmp(e, "1"));
+        enabled = requested && [MTLFXSpatialScalerDescriptor supportsDevice:g_dev];
+        if (requested && !enabled) MLOG("present upscaling: no MetalFX spatial scaler on this GPU");
+    }
+    NSUInteger w = (NSUInteger)vp.width, h = (NSUInteger)vp.height;
+    if (!enabled || !size.width || !size.height || w < size.width || h < size.height ||
+        (w == size.width && h == size.height)) return nil;
+    static id<MTLFXSpatialScaler> scaler;
+    static id<MTLTexture> in, out;
+    static NSUInteger active[6], refused[6];
+    static uint64_t last_attempt;
+    NSUInteger key[6] = {size.width, size.height, raw.pixelFormat, w, h, output_format};
+    if (!scaler || memcmp(key, active, sizeof key)) {
+        if (!memcmp(key, refused, sizeof key) || (last_attempt && g_present_n < last_attempt + 30)) return nil;
+        last_attempt = g_present_n;
+        MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+        d.inputWidth = size.width; d.inputHeight = size.height;
+        d.outputWidth = w; d.outputHeight = h;
+        d.colorTextureFormat = raw.pixelFormat; d.outputTextureFormat = output_format;
+        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        id<MTLFXSpatialScaler> next = [d newSpatialScalerWithDevice:g_dev];
+        if (next) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:raw.pixelFormat
+                                                                                         width:size.width height:size.height mipmapped:NO];
+            td.storageMode = MTLStorageModePrivate; td.hazardTrackingMode = MTLHazardTrackingModeTracked;
+            td.usage = next.colorTextureUsage | MTLTextureUsageShaderRead;
+            id<MTLTexture> next_in = [g_dev newTextureWithDescriptor:td];
+            td.pixelFormat = output_format; td.width = w; td.height = h;
+            td.usage = next.outputTextureUsage | MTLTextureUsageShaderRead;
+            id<MTLTexture> next_out = [g_dev newTextureWithDescriptor:td];
+            if (next_in && next_out) {
+                scaler = next; in = next_in; out = next_out;
+                memcpy(active, key, sizeof key);
+                MLOG("present upscaling: MetalFX spatial scaler (classic Metal) %lux%lu → %lux%lu",
+                     (unsigned long)size.width, (unsigned long)size.height, (unsigned long)w, (unsigned long)h);
+            } else next = nil;
+        }
+        if (!next) {
+            memcpy(refused, key, sizeof key);
+            MLOG("present upscaling: MetalFX rejected this classic Metal size or format; using bilinear");
+            return nil;
+        }
+    }
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    if (!blit) return nil;
+    [blit copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:origin sourceSize:size
+                toTexture:in destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    scaler.colorTexture = in; scaler.outputTexture = out;
+    scaler.inputContentWidth = size.width; scaler.inputContentHeight = size.height;
+    [scaler encodeToCommandBuffer:cb];
+    id<MTLFXSpatialScaler> submitted = scaler;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; (void)submitted; }];
+    return out;
+}
+
 static int present_encode_m4(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
@@ -9825,6 +9890,10 @@ static int present_encode_m4(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTL
              (unsigned long)cw, (unsigned long)ch, (unsigned long)dst.width, (unsigned long)dst.height,
              vp.originX, vp.originY, vp.width, vp.height, (vp.width / cw) / (vp.height / ch));
     }
+    id<MTLTexture> raw = present_raw_src(src);
+    id<MTLTexture> scaled = legacy_present_upscale(cb, raw, MTLOriginMake(cx, cy, 0),
+                                                   MTLSizeMake(cw, ch, 1), vp, dst.pixelFormat);
+    if (scaled) { raw = scaled; cx = cy = 0; cw = scaled.width; ch = scaled.height; }
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
@@ -9835,17 +9904,17 @@ static int present_encode_m4(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTL
     if (!en) { MLOG("【红】iOS17 出图渲染编码器创建失败"); return 0; }
 
 
-    [en setFragmentTexture:present_raw_src(src) atIndex:0];
+    [en setFragmentTexture:raw atIndex:0];
     [en setFragmentSamplerState:g_blit_samp atIndex:0];
     float *uv = g_present_uv[uv_i].contents;
-    uv[0] = (float)cx / src.width; uv[1] = (float)cy / src.height; uv[2] = (float)cw / src.width; uv[3] = (float)ch / src.height;
-    uv[4] = (cx + 0.5f) / src.width; uv[5] = (cy + 0.5f) / src.height; uv[6] = (cx + cw - 0.5f) / src.width; uv[7] = (cy + ch - 0.5f) / src.height;
+    uv[0] = (float)cx / raw.width; uv[1] = (float)cy / raw.height; uv[2] = (float)cw / raw.width; uv[3] = (float)ch / raw.height;
+    uv[4] = (cx + 0.5f) / raw.width; uv[5] = (cy + 0.5f) / raw.height; uv[6] = (cx + cw - 0.5f) / raw.width; uv[7] = (cy + ch - 0.5f) / raw.height;
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [en setFragmentBuffer:g_present_uv[uv_i] offset:0 atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end(en);
-    return 1;
+    return scaled ? 2 : 1;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 static void classic_present_done(void) {

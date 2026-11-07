@@ -259,13 +259,59 @@ static void integer_entry_draw(id<MTLFunction> vertex) {
     CHECK(pso_desc(&k,vs,fs,fs->fn,0).fragmentFunction==fs->fn,"explicit fragment override remains intact");
 }
 
+static void classic_metalfx_present(void) {
+    if (![MTLFXSpatialScalerDescriptor supportsDevice:g_dev]) {
+        puts("SKIP: this GPU has no classic MetalFX spatial scaler");
+        return;
+    }
+    setenv("DM_PRESENT_UPSCALE", "metalfx", 1);
+    const NSUInteger widths[] = {1280, 960}, heights[] = {720, 540};
+    for (int i = 0; i < 2; i++) {
+        NSUInteger w = widths[i], h = heights[i];
+        MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
+                                                                                     width:w+2 height:h+2 mipmapped:NO];
+        sd.storageMode = MTLStorageModeShared; sd.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        id<MTLTexture> src = [g_dev newTextureWithDescriptor:sd];
+        MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                     width:2000 height:1080 mipmapped:NO];
+        od.storageMode = MTLStorageModeShared; od.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> out = [g_dev newTextureWithDescriptor:od];
+        CHECK(src && out, "MetalFX present textures exist");
+        if (!src || !out) return;
+        uint32_t *src_pixels = calloc((w+2)*(h+2), sizeof *src_pixels);
+        if (!src_pixels) abort();
+        for (NSUInteger y = 1; y <= h; y++)
+            for (NSUInteger x = 1; x <= w; x++) src_pixels[y*(w+2)+x] = 0xffc84080;
+        [src replaceRegion:MTLRegionMake2D(0, 0, w+2, h+2) mipmapLevel:0 withBytes:src_pixels bytesPerRow:(w+2)*4];
+        free(src_pixels);
+        int crop[4] = {1, 1, (int)w, (int)h};
+        g_present_n += 30;
+        id<MTLCommandBuffer> cb = [g_q commandBuffer];
+        CHECK(present_encode_m4(cb, src, out, crop, 0) == 2, i ? "540p uses MetalFX" : "720p uses MetalFX");
+        [cb commit]; [cb waitUntilCompleted];
+        CHECK(cb.status == MTLCommandBufferStatusCompleted, "classic MetalFX GPU pass completes");
+        uint8_t p[4];
+        [out getBytes:p bytesPerRow:4 fromRegion:MTLRegionMake2D(1000, 540, 1, 1) mipmapLevel:0];
+        CHECK(abs(p[0]-200)<=3 && abs(p[1]-64)<=3 && abs(p[2]-128)<=3 && p[3]==255,
+              "cropped MetalFX present preserves the source's display colors");
+        [out getBytes:p bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 540, 1, 1) mipmapLevel:0];
+        CHECK(p[0]==0 && p[1]==0 && p[2]==0 && p[3]==255, "MetalFX present keeps black aspect-ratio bars");
+    }
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc > 1 && !strcmp(argv[1], "--cpu-only")) {
         cpu_pool_bc_readback();
         printf("legacy CPU pool readback: %d checks, %d failures\n", checks, failed);
         return failed != 0;
     }
-    mtl_init(); binding_commands(); cpu_texture_readback(); cpu_pool_bc_readback(); NSError *error = nil;
+    mtl_init();
+    if (getenv("DM_TEST_CLASSIC_METALFX")) {
+        classic_metalfx_present();
+        printf("classic MetalFX: %d checks, %d failures\n", checks, failed);
+        return failed != 0;
+    }
+    binding_commands(); cpu_texture_readback(); cpu_pool_bc_readback(); NSError *error = nil;
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
         "fragment float4 f() { return float4(.125,.25,.5,.375); }\n"
