@@ -1,0 +1,38 @@
+--- a/GameSettings.h
++++ b/GameSettings.h
+@@ -30,12 +30,19 @@
+ static NSDictionary *TTChoice(NSString *env,NSString *label,NSString *def,NSArray *options){
+     return @{@"env":env,@"label":label,@"default":def,@"kind":@"choice",@"section":@"Game",@"options":options};
+ }
+-// MKW's native NVN host supports these settings even for data-only imports
+-// that did not ship a launcher schema.
++// Signed Switch frameworks can arrive with a data-only import and no
++// launcher.json. Both controls are implemented by the native host.
++static BOOL TTIsSignedSwitchTitle(NSString *title){
++    NSString *upper=title.uppercaseString;
++    if(upper.length!=16||(![upper hasPrefix:@"01"]&&![upper hasPrefix:@"04"]))return NO;
++    if([upper rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789ABCDEF"] invertedSet]].location!=NSNotFound)return NO;
++    NSString *name=[NSString stringWithFormat:@"DmGame%@.framework/DmGame",upper];
++    return [NSFileManager.defaultManager fileExistsAtPath:[NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:name]];
++}
+ static NSDictionary *TTNativeGraphicsSetting(NSString *title,NSString *key){
+-    if(![title.lowercaseString isEqual:@"0400c3f00006e000"])return nil;
+-    if([key isEqual:@"DM_OPMODE"])return TTChoice(key,@"运行模式",@"1",@[@[@"0",@"掌机（720p 档）"],@[@"1",@"底座（1080p 档）"]]);
+-    if([key isEqual:@"DM_PRESENT_UPSCALE"])return TTChoice(key,@"画面超分",@"off",@[@[@"off",@"关闭"],@[@"metalfx",@"MetalFX"]]);
++    if(!TTIsSignedSwitchTitle(title))return nil;
++    if([key isEqual:@"DM_OPMODE"])return TTChoice(key,@"运行模式",@"0",@[@[@"0",@"掌机"],@[@"1",@"底座"]]);
++    if([key isEqual:@"DM_PRESENT_UPSCALE"])return TTChoice(key,@"画面超分",@"metalfx",@[@[@"off",@"关闭"],@[@"metalfx",@"MetalFX"]]);
+     return nil;
+ }
+ static NSArray *TTGTASettingSpecs(void){
+--- a/main.m
++++ b/main.m
+@@ -109,7 +109,7 @@
+     TTApplyGameOverrides(titleID);
+     // The MKW profile can request the highest scene tier even when the game
+     // is in handheld mode. Match the scene tier to the effective mode.
+-    if(TTNativeGraphicsSetting(titleID,@"DM_OPMODE")){
++    if([titleID.lowercaseString isEqual:@"0400c3f00006e000"]){
+         const char *mode=getenv("DM_OPMODE");
+         if(mode&&!strcmp(mode,"0"))setenv("DM_GRAPHICS_SCALE","0",1);
+     }

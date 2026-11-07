@@ -67,3 +67,14 @@ chain and save handling are unchanged.
 
 Apply `ocarina-air-offline-play-report.patch` to `dm/host/hle_sf.c` in the
 pinned Air launcher. The original SHA-256 is `4e37968a18e54f1a00b4bb516665aaa6973cb96cb8d14f83e608b953cd99b6f4`.
+
+## Air Gamebox: native graphics settings for data-only games
+
+Apply `air-native-quality-defaults.patch` to the 60.60 Air menu sources
+(`main.m` and `GameSettings.h`). Games delivered with a signed Switch
+framework but without `launcher.json` can now inherit the library's handheld
+and MetalFX defaults and override either setting per game. The framework is
+checked before using the fallback; native PC ports stay on their own paths.
+Handheld mode is named as such because it does not promise 720p. The patch was
+compiled and linked into the candidate mixed-engine shell; install and
+gameplay validation are pending.
