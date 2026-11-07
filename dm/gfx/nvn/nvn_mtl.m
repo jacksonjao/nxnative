@@ -4517,24 +4517,53 @@ static void treg_finish_submission(void) {
 // registrations ended in a new Metal texture view, 45% of the replay's time. A hit is checked against the current base texture (re-uploads and format-view upgrades replace it).
 // Only live textures are cached; entries go when the texture is finalized (mtl_tex_release) or its pool is (treg_drop_pool_views), and all of them past VC_MAX textures. Under g_rmu
 typedef struct { uint32_t pf, l0, nl, s0, ns; uint8_t tt, sw[4], pad[3]; } vc_key;
-enum { VC_WAYS = 4, VC_MAX = 16384 };
-typedef struct { const void *pool; unsigned next; vc_key k[VC_WAYS]; void *view[VC_WAYS];   // view: retained
+enum { VC_WAYS = 4, VC_MAX = 16384, VC_MKW_WAYS = 64, VC_MKW_EXTRA = 16384 };
+typedef struct { vc_key key; void *view; } vc_slot;
+typedef struct { const void *pool; unsigned next, cap, replaced;
+                 vc_slot slot[VC_WAYS], *extra;   // each view is retained
                  void *rows, *rows_of; uint64_t rows_rid, rows_n; } vc_set;   // rows: a texture buffer as 2D rows (tbuf_as_2d; retained, resident), rows_of / rows_n: the buffer texture it was made from and its element count
 static nvn_hmap g_vc = {.klen = 8};   // texture serial → vc_set
 static uint64_t g_vc_hit, g_vc_new;
+static unsigned g_vc_extra;
+static unsigned vc_cap(const vc_set *s) { return s->cap ? s->cap : VC_WAYS; }
+static vc_slot *vc_at(vc_set *s, unsigned i) {
+    return i < VC_WAYS ? &s->slot[i] : &s->extra[i-VC_WAYS];
+}
+static void vc_drop_slot(vc_slot *slot) {
+    if (!slot->view) return;
+    defer_obj_unref((__bridge id)slot->view);
+    CFRelease(slot->view);
+    slot->view = NULL;
+}
+static int vc_grow_mkw(vc_set *s) {
+    const unsigned cap = vc_cap(s);
+    if (cap >= VC_MKW_WAYS || s->replaced < cap || cap > VC_MKW_EXTRA - g_vc_extra)
+        return 0;
+    vc_slot *extra = realloc(s->extra, (2*cap-VC_WAYS)*sizeof *extra);
+    if (!extra) return 0;
+    memset(extra+cap-VC_WAYS, 0, cap*sizeof *extra);
+    s->extra = extra; s->cap = 2*cap; s->replaced = 0;
+    g_vc_extra += cap;
+    return 1;
+}
 static void vc_rows_drop(vc_set *s) { if (s->rows) { defer_obj_release((__bridge id)s->rows); CFRelease(s->rows); s->rows = s->rows_of = NULL; s->rows_rid = s->rows_n = 0; } }
 static void vc_set_free(void *p) {
     vc_set *s = p;
-    for (int i = 0; i < VC_WAYS; i++) if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
+    for (unsigned i = 0; i < vc_cap(s); i++) vc_drop_slot(vc_at(s,i));
+    g_vc_extra -= vc_cap(s)-VC_WAYS;
+    free(s->extra);
     vc_rows_drop(s);
     free(s);
 }
 static id<MTLTexture> vc_get(uint64_t ser, const vc_key *k, id<MTLTexture> base) {
     vc_set *s = nvn_hm_get(&g_vc, &ser); if (!s) return nil;
-    for (int i = 0; i < VC_WAYS; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) {
-        id<MTLTexture> v = (__bridge id<MTLTexture>)s->view[i];
+    for (unsigned i = 0; i < vc_cap(s); i++) {
+        vc_slot *slot = vc_at(s,i);
+        if (!slot->view || memcmp(&slot->key, k, sizeof *k)) continue;
+        id<MTLTexture> v = (__bridge id<MTLTexture>)slot->view;
         if (v.parentTexture == base) { g_vc_hit++; return v; }
-        defer_obj_unref(v); CFRelease(s->view[i]); s->view[i] = NULL; return nil;   // made from a base texture since replaced
+        vc_drop_slot(slot);   // made from a base texture since replaced
+        if (strcasecmp(DM_GAME_ID, "0400C3F00006E000")) return nil;
     }
     return nil;
 }
@@ -4551,9 +4580,18 @@ static vc_set *vc_set_for(uint64_t ser, const void *pool) {   // the texture's e
 }
 static void vc_put(uint64_t ser, const void *pool, const vc_key *k, id<MTLTexture> v) {
     vc_set *s = vc_set_for(ser, pool); if (!s) return;
-    unsigned i = s->next++ % VC_WAYS;
-    if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
-    s->k[i] = *k; s->view[i] = (void *)CFBridgingRetain(v); g_vc_new++;
+    unsigned cap = vc_cap(s), i = cap;
+    if (!strcasecmp(DM_GAME_ID, "0400C3F00006E000")) {
+        for (i = 0; i < cap && vc_at(s,i)->view; i++) {}
+        if (i == cap && !vc_grow_mkw(s)) {
+            if (s->replaced < cap) s->replaced++;
+        }
+        cap = vc_cap(s);
+    }
+    if (i == cap) i = s->next++ % cap;
+    vc_slot *slot = vc_at(s,i);
+    vc_drop_slot(slot);
+    slot->key = *k; slot->view = (void *)CFBridgingRetain(v); g_vc_new++;
 }
 void mtl_vc_drop(uint64_t ser) { os_unfair_lock_lock(&g_rmu); vc_set *s = nvn_hm_del(&g_vc, &ser); if (s) vc_set_free(s); os_unfair_lock_unlock(&g_rmu); }
 void mtl_vc_stats(unsigned *n, uint64_t *hit, uint64_t *made) { os_unfair_lock_lock(&g_rmu); *n = g_vc.n; *hit = g_vc_hit; *made = g_vc_new; os_unfair_lock_unlock(&g_rmu); }
