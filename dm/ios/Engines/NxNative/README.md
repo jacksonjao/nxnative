@@ -82,3 +82,17 @@ gameplay validation are pending.
 The same patch exposes the existing 3D render scale for Tears of the Kingdom
 and the existing dynamic-resolution switch for NieR. The fallback only shows
 these controls if the signed framework advertises the respective fixup.
+
+## Air Gamebox: default frame pacing
+
+Apply `air-library-paced-default.patch` to the Air mixed-engine shell after
+the native graphics settings patch. The library defaults to the game's
+pacing profile. It keeps an explicit environment profile and lets a saved
+per-game choice override it. The display-link fallback now follows the final
+choice after the menu and no longer sets 120 Hz pacing before that choice.
+The launcher records the effective mode and the explicit present rate, if
+any. This does not unlock a game's simulation rate or promise 60 fps.
+
+The two changed shell objects compiled and linked against the Air 60.60
+base without rebuilding any cartridge or shader. Installation and gameplay
+validation of the revised shell are pending.

@@ -1,0 +1,64 @@
+--- a/Sources/main.m
++++ b/Sources/main.m
+@@ -286,14 +286,18 @@
+     }
+     // Default for every iPhone/iPad, independent of device/GPU generation.
+     // Explicit launch/environment preferences can retain original game pacing.
++#ifndef DM_LIBRARY_HOST
+     if (!getenv("DM_FRAME_LIMIT")) setenv("DM_FRAME_LIMIT", "unlimited", 0);
++#endif
+ #if defined(DM_AIR_PERFORMANCE_BUILD) && DM_AIR_PERFORMANCE_BUILD
+     // Build bases on demand on Air. Avoid the whole-library startup prebuild
+     // and keep explicit per-game diagnostic preferences above these defaults.
+     if (!getenv("DM_PSO_MTL4")) setenv("DM_PSO_MTL4", "1", 0);
+     if (!getenv("DM_PSO_PREBUILD")) setenv("DM_PSO_PREBUILD", "0", 0);
+ #endif
++#ifndef DM_LIBRARY_HOST
+     if (dm_frame_limit_unlimited()) setenv("DM_PRESENT_LINK", "2", 1);
++#endif
+     setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (LauncherSettings.swift)
+     setenv("DM_ENV_LAUNCH_KEYS", [from_launch componentsJoinedByString:@" "].UTF8String, 1);   // and what the launch environment set (docs/frontends.md, Saved choices)
+     front_hud_env();   // an env file's DM_METAL_HUD; nothing in this process makes a Metal device before startGame (front_ios.m), which applies the launcher's
+@@ -436,6 +440,11 @@
+             [owner.window.rootViewController presentViewController:alert animated:YES completion:nil];return;
+         }
+         TonTonApplyGlobalSettings(titleID);
++        if (!getenv("DM_FRAME_LIMIT")) setenv("DM_FRAME_LIMIT", "game", 0);
++        if (dm_frame_limit_unlimited() && !getenv("DM_PRESENT_LINK"))
++            setenv("DM_PRESENT_LINK", "2", 0);
++        fprintf(stderr, "boot: effective frame pacing %s, present Hz %s\n",
++                getenv("DM_FRAME_LIMIT"), getenv("DM_PRESENT_HZ") ?: "engine default");
+         if (g_independent_host.start) {
+             g_independent_host.setCatalog(independent_catalog);
+             const char *error = g_independent_host.start((const char *const *)g_argv, g_argc, g_independent_image);
+--- a/LibraryApp/Sources/main.m
++++ b/LibraryApp/Sources/main.m
+@@ -36,7 +36,7 @@
+ // launcher.json. Game-specific settings still require an entry in that schema.
+ static NSArray<NSDictionary *> *libraryPreferences(void){
+     return @[
+-        @{@"key":@"DM_FRAME_LIMIT",@"title":@"帧率限制",@"default":@"unlimited",@"choices":@[@[@"unlimited",@"不限制"],@[@"game",@"游戏原始设置"]]},
++        @{@"key":@"DM_FRAME_LIMIT",@"title":@"帧率限制",@"default":@"game",@"choices":@[@[@"unlimited",@"不限制"],@[@"game",@"游戏原始设置"]]},
+         @{@"key":@"DM_LANG",@"title":@"游戏语言",@"choices":@[@[@"auto",@"游戏默认"],@[@"chinese",@"优先中文"],@[@"english",@"英语"]]},
+         @{@"key":@"DM_OPMODE",@"title":@"运行模式",@"default":@"0",@"choices":@[@[@"auto",@"游戏默认"],@[@"0",@"掌机（通常为 720p 档）"],@[@"1",@"底座"]]},
+         @{@"key":@"DM_PRESENT_ASPECT",@"title":@"画面适配",@"choices":@[@[@"auto",@"游戏默认"],@[@"fit",@"保持原比例"],@[@"fill",@"铺满屏幕"]]},
+@@ -70,7 +70,7 @@
+             // Keep an explicit game pacing profile over the library default.
+             // A saved setting for this title still wins below.
+             const char *profile=getenv("DM_FRAME_LIMIT");
+-            if(profile && !strcmp(profile,"game"))continue;
++            if(profile && (!strcmp(profile,"game") || !strcmp(profile,"unlimited")))continue;
+             if([choice isEqual:@"unlimited"]||[choice isEqual:@"game"])setenv(key.UTF8String,choice.UTF8String,1);
+             continue;
+         }
+--- a/LibraryApp/Sources/GameSettings.h
++++ b/LibraryApp/Sources/GameSettings.h
+@@ -74,7 +74,7 @@
+     NSArray *paths=@[[documents stringByAppendingPathComponent:[NSString stringWithFormat:@"Games/%@/Resources/dm/launcher.json",title.lowercaseString]],
+         [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:[NSString stringWithFormat:@"GameResources/%@/Resources/dm/launcher.json",title.lowercaseString]]];
+     NSMutableArray *out=[NSMutableArray arrayWithArray:@[
+-        TTChoice(@"DM_FRAME_LIMIT",@"帧率限制",@"unlimited",@[@[@"unlimited",@"不限制"],@[@"game",@"游戏原始设置"]]),
++        TTChoice(@"DM_FRAME_LIMIT",@"帧率限制",@"game",@[@[@"unlimited",@"不限制"],@[@"game",@"游戏原始设置"]]),
+         TTChoice(@"DM_PRESENT_ASPECT",@"画面适配",@"auto",@[@[@"auto",@"游戏默认"],@[@"fit",@"保持原比例"],@[@"fill",@"铺满屏幕"]]),
+         TTChoice(@"DM_TOUCH_SIZE",@"虚拟按键大小",@"medium",@[@[@"small",@"小"],@[@"medium",@"中"],@[@"large",@"大"]]),
+         TTChoice(@"DM_TOUCH_STICK",@"虚拟左摇杆位置",@"corner",@[@[@"corner",@"左下"],@[@"higher",@"靠上"],@[@"inward",@"靠内"]])]];
