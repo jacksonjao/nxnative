@@ -112,3 +112,14 @@ Two exact-build observation sites adapt the camera and HUD to the actual window.
 The saved-frame layout was checked against `entry.S`: Q registers begin at byte 256, with NZCV/FPSR/FPCR after byte 768. Callback tests cover 76:35, 683:512 and 4:3, verify exact module/gate guards, and verify every other GPR/SIMD/flags byte stays unchanged. Instruction-level rewrite and actual device display validation must pass before declaring fullscreen complete.
 
 Frame timing, 120 fps, internal resolution scaling and interpolation are still open. The shared input surface keeps every native button and keyboard direction; compilation does not certify game compatibility.
+
+### Air update 4.0.0: startup after the shared fonts load
+
+The Air startup log reached the standard shared font and then aborted at
+`nn::bluetooth::InitializeBle` when the SDK tried to open the Horizon `bt`
+service. This matches [nxnative issue #207](https://github.com/seedds/nxnative/issues/207).
+The host backports the offline BLE hooks from `62be7fa`: scans find no
+accessory and events never fire. Pokémon GO Plus + is unavailable; this
+does not use the iPhone Bluetooth radio. All 15 hook names were found in
+the existing Violet framework. The signed Air update keeps the original
+game frameworks and assets; entering the title screen is still unverified.
