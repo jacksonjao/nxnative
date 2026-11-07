@@ -282,6 +282,8 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `ListAudioIns` reports none, both opens fail, and the calls that need an open AudioIn answer without touching the game's object (`hle_audio.c`). `AcquireAudioDeviceNotificationForInput` binds an event that is never signaled and returns 0x499 when acquired again, as the SDK does with a flag of its own (SDK 13.3.0 `sdk+0x56300`: `+0x851`, the output's `+0x852`; `hle_audren.c`).
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each); [Portal 2](../../dm/games/0100ABD01785C000/README.md) (SDK 13.3.0: its audio thread at start, `main+0x19f37c`).
 
+- **Switch 2:** The Ocarina of Time port aborts in the SDK’s `audio::detail::ListVirtualInputDevices` after opening `auddmg:u` (`sdk+0x1f61ac` on the tested build). Its caller skips microphone setup when the count is zero. Intercept the public `audio::ListVirtualInputDevices` import, return zero and clear the first byte of each unused name (at most eight, as in the SDK). This leaves playback on the existing host audio path.
+
 ### `OpenAudioOut` without a release event (SDK 22)
 
 - **Symptom:** `game called nn::diag abort: Result 0xe15, call site sdk+0x1f8704`, i.e. inside `nn::audio::CreateAudioOutManagerByHipc+0xb4`, before any audio device opened.
