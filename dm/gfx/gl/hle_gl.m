@@ -2241,6 +2241,25 @@ static void *gl_lookup(const char *name) {
     static const hle_ent *sec; static unsigned long sz;
     if (!sec) sec = (const hle_ent *)getsectiondata(DM_HOST_IMAGE, "__DATA", "swhle", &sz);
     for (unsigned long i = 0; i < sz / sizeof *sec; i++) if (!strcmp(sec[i].name, name)) return sec[i].fn;
+    // Fate/stay night requests the EXT FBO entry points. Resolve only
+    // extension functions whose signatures and supported semantics match
+    // the core operations; unknown extension names remain null.
+    static const struct { const char *ext, *core; } framebuffer_ext[] = {
+#define EXT_FBO(core) { #core "EXT", #core }
+        EXT_FBO(glGenFramebuffers), EXT_FBO(glDeleteFramebuffers), EXT_FBO(glBindFramebuffer),
+        EXT_FBO(glCheckFramebufferStatus), EXT_FBO(glFramebufferTexture2D),
+        EXT_FBO(glFramebufferTexture3D), EXT_FBO(glFramebufferRenderbuffer),
+        EXT_FBO(glGenRenderbuffers), EXT_FBO(glDeleteRenderbuffers), EXT_FBO(glBindRenderbuffer),
+        EXT_FBO(glGetRenderbufferParameteriv), EXT_FBO(glRenderbufferStorage),
+        EXT_FBO(glRenderbufferStorageMultisample), EXT_FBO(glGenerateMipmap),
+#undef EXT_FBO
+    };
+    for (size_t j = 0; j < sizeof framebuffer_ext / sizeof *framebuffer_ext; j++) {
+        if (strcmp(framebuffer_ext[j].ext, name)) continue;
+        for (unsigned long i = 0; i < sz / sizeof *sec; i++)
+            if (!strcmp(sec[i].name, framebuffer_ext[j].core)) return sec[i].fn;
+        break;
+    }
     return NULL;
 }
 // DM_GL_STUBS=1 (bring-up): a GL name the layer does not implement gets a stub of its own instead of a null pointer, which reports its first call and returns 0; a game that calls
