@@ -688,7 +688,13 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     if (!sd->control) return 0;
     nvn_ctl_lens(sd->control, &nctl, &ncode);
     int code = sd->data && ncode && ncode < (1u << 24);
-    if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
+    // Shader translation reads the guest bytes on the CPU. Do not build a
+    // GPU buffer merely to validate the range (upstream f25fa9562ee9).
+    if (mapped) {
+        const char *id = DM_GAME_ID;
+        const int no_residency = !strcasecmp(id, "0400C3F00006E000") || !strcasecmp(id, "0100F43008C44000");
+        if (!code || !(no_residency ? mtl_addr_known(sd->data, ncode) : mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
+    }
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
     // Profile key shader_key_skip: bytes of the control section hashed as zeros (shader_split.py key_ctl). Batman: Arkham Knight's engine shares one control section among shaders whose
     // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader

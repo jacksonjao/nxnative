@@ -4203,6 +4203,27 @@ static id<MTLTexture> tex_promote_2d_cube(int tid, id<MTLTexture> t, uint64_t *r
 // The texture type the shader declares differs from the one the descriptor gives: use a compatible view. Maxwell sample instructions carry their own dimension, and a non-array instruction reading a 2D array texture reads layer 0;
 // on Metal a 2D array bound to a texture2d argument is a type mismatch with undefined reads (measured: one fixed value). Super Mario 3D World + Bowser's Fury creates its pre-lighting buffer as a one-layer 2D array
 // and the deferred lighting shader samples it as 2D: the ambient light of the whole picture became one colour, washed out white. Supports 2D array <-> 2D and 2D array -> cube / cube array; any other mismatch is reported once. Caller holds g_rmu
+// Storage-image views use identity swizzle and the registered mip/layer
+// even when the game binds an array layer into a 2D write slot (MKW).
+static id<MTLTexture> legacy_mkw_image_2d(int tid, id<MTLTexture> t, uint64_t *rid) {
+    if (tid <= 0 || tid >= g_ntreg) return nil;
+    treg_t *r = &g_treg[tid];
+    enum { key = 0x80 | MTLTextureType2D };
+    if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == key) {
+        *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt;
+    }
+    id<MTLTexture> base = t;
+    NSUInteger level = 0, slice = 0;
+    while (base.parentTexture) { level += base.parentRelativeLevel; slice += base.parentRelativeSlice; base = base.parentTexture; }
+    id<MTLTexture> v = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(level, t.mipmapLevelCount) slices:NSMakeRange(slice, 1)];
+    if (!v || !(v.usage & MTLTextureUsageShaderWrite)) return nil;
+    if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); }
+    r->alt = (void *)CFBridgingRetain(v); r->alt_of = (__bridge void *)t; r->alt_type = key;
+    *rid = r->alt_rid = legacy_texture_rid(v);
+    static int noted;
+    if (!noted++) MLOG("MKW storage image: bound 2D view of an array layer (texture %d, mip %lu, slice %lu)", tid, (unsigned long)level, (unsigned long)slice);
+    return v;
+}
 static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, uint64_t *rid) {
     MTLTextureType have = t.textureType; NSUInteger ns = 0, l0 = 0, nl = t.mipmapLevelCount, s0 = 0; id<MTLTexture> src = t;
     int cube_parent = t.parentTexture && t.parentTexture.textureType == MTLTextureType2DArray &&
@@ -5892,6 +5913,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
             za_diag_use("image", sh, nvn_stage, reg, tid, t && tid < g_ntreg ? g_treg[tid].t.serial : 0);
             if (passdump()) PD("W %llu st%d reg%d tid=%d %s ser=%llu", g_stat_pass, nvn_stage, reg, tid, t ? "实" : "哑", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull);
+            if (t && b->dtt == MTLTextureType2D && t.textureType == MTLTextureType2DArray &&
+                !strcasecmp(DM_GAME_ID, "0400C3F00006E000")) t = legacy_mkw_image_2d(tid, t, &trid);
             if (t && !(t.usage & MTLTextureUsageShaderWrite)) { RED_ONCE(32, "图像槽绑的贴图没有可写用途（贴图号 %d）", tid); t = nil; }
             if (!t) { t = dummy_img(b->dtt, b->dpf); trid = g_dummy_img_rid[b->dtt & 7][b->dpf & 3]; }   // Unbound: D3D semantics discard the write - write into a dedicated dummy texture so the set that reads 0 is not polluted
             slots[aid] = trid;
