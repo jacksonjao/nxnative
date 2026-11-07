@@ -2617,7 +2617,12 @@ static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int 
     if (!r && rs) r = fn(rs, (uint64_t)(re - rs), arg);
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
-static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp) { return nvn_dirty_since(p, n, stamp); }
+int nvn_dirty_since_cached(const void **span, const void *addr, size_t len, uint64_t stamp);
+static _Thread_local const void *t_rw_span;
+static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp) {
+    if (strcasecmp(DM_GAME_ID, "0400C3F00006E000")) return nvn_dirty_since(p, n, stamp);
+    return nvn_dirty_since_cached(&t_rw_span, p, n, stamp);
+}
 static int run_protect(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect(p, n); return 0; }
 int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { return vpt_walk(pool, a, n, gen, run_written, stamp); }
 int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every page of [a, a+n) has memory behind it
