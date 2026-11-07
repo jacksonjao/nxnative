@@ -6187,10 +6187,11 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // pipeline found in the files. The flush used to hold a lock against every such compile instead, and one compile that did not return (Super Mario Odyssey's alRenderMaterialUber
 // with the front end at -O2: 33.7 minutes until Metal gave up, GitHub issue #294) held the flush, and the flush every compile and draw that came after it. Now such a compile
 // holds back the file of its own period and nothing else
-@interface ArchEpoch : NSObject { @public id<MTL4Compiler> comp; id<MTL4PipelineDataSetSerializer> ser; dispatch_group_t busy; _Atomic int active, n, vd; int compacting; } @end
+@interface ArchEpoch : NSObject { @public id<MTL4Compiler> comp; id<MTL4PipelineDataSetSerializer> ser; dispatch_group_t busy; _Atomic int active, n, vd, cs; int compacting; } @end
 // n, vd: bases captured, those with a vertex layout
 @implementation ArchEpoch @end
 static ArchEpoch *g_ep; static os_unfair_lock g_ep_lock = OS_UNFAIR_LOCK_INIT;   // the current period
+static int g_cps_files;
 static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
@@ -6356,10 +6357,12 @@ static void pso4_init(void) {
             for (NSString *n in names.reverseObjectEnumerator) {   // newest first
                 NSString *p = [g_arch_dir stringByAppendingPathComponent:n]; NSError *ae = nil;
                 id<MTL4Archive> a = arch_file_ok(p) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae] : nil;
+                int cf = [n hasPrefix:@"c"];
                 int pf = [n hasPrefix:@"p"];
-                if (a) { [pf ? archp : arch addObject:a]; if (!pf) [runf addObject:p]; bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize]; }
+                if (cf) ++g_cps_files;
+                if (a) { [pf ? archp : arch addObject:a]; if (!pf && !cf) [runf addObject:p]; bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize]; }
                 else MLOG("[RED] pipeline archive file %s not usable (%s): its bases are built again", p.UTF8String, ae ? ae.localizedDescription.UTF8String : "not a pipeline archive");
-                g_arch_seq = MAX(g_arch_seq, [n substringFromIndex:pf].intValue + 1);
+                g_arch_seq = MAX(g_arch_seq, [n substringFromIndex:pf || cf].intValue + 1);
             }
             if (runf.count > PSO_ARCH_COMPACT && arch_compact_allowed()) { g_compact_enabled = 1; g_compact_files = runf; }
             MLOG("pipeline archive %s: %lu files (%lu of bases without a vertex layout), %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String, (unsigned long)(arch.count + archp.count - (g_arch_bundle != nil)),
@@ -6384,7 +6387,7 @@ static void arch_write(ArchEpoch *ep) {
     g_arch_flush_ok = 0;
     [NSFileManager.defaultManager createDirectoryAtPath:g_arch_dir withIntermediateDirectories:YES attributes:nil error:nil];
     uint64_t t0 = bp_now(); NSError *e = nil;
-    NSString *path = [g_arch_dir stringByAppendingPathComponent:[NSString stringWithFormat:vd ? @"%05d.mtl4a" : @"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];
+    NSString *path = [g_arch_dir stringByAppendingPathComponent:[NSString stringWithFormat:atomic_load(&ep->cs) ? @"c%05d.mtl4a" : vd ? @"%05d.mtl4a" : @"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];
     if (ep->compacting) [arch_compact_stamp() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     BOOL ok = [ep->ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&e];
     if (ep->compacting) unlink(arch_compact_marker().fileSystemRepresentation);
@@ -6393,7 +6396,9 @@ static void arch_write(ArchEpoch *ep) {
     if (!ok) { MLOG("[RED] pipeline archive: writing %s failed%s%s", path.UTF8String, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); unlink(tmp.fileSystemRepresentation); }
     else {
         g_arch_flush_ok = 1;
-        MLOG("pipeline archive: %d new pipeline bases written to %s (%.1f MB, %.0f ms)", n, path.lastPathComponent.UTF8String,
+        if (atomic_load(&ep->cs))
+            MLOG("compute archive: saved %d compute pipelines", atomic_load(&ep->cs));
+        MLOG("pipeline archive: %d new pipelines written to %s (%.1f MB, %.0f ms)", n, path.lastPathComponent.UTF8String,
              [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize] / 1048576.0, (bp_now() - t0) / 1e6);
     }
     if (ep->compacting) arch_compact_finish();
@@ -6423,6 +6428,51 @@ static void arch_flush_wait(void) { arch_flush(); if (g_arch_pending) dispatch_g
 static void arch_note_new(void) {   // a base was compiled: flush 10 s later (one flush for a burst of them)
     if (!g_arch_q || atomic_exchange(&g_arch_sched, 1)) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * (int64_t)NSEC_PER_SEC), g_arch_q, ^{ atomic_store(&g_arch_sched, 0); arch_flush(); });
+}
+// nxnative 30fb21363578: reuse compute pipelines across process launches.
+static id<MTLComputePipelineState> game_compute_pipeline(id<MTLFunction> f, NSError **error) {
+    const char *title_id = DM_GAME_ID;
+    if (strcasecmp(title_id, "0400C3F00006E000") && strcasecmp(title_id, "0100F43008C44000"))
+        return [g_dev newComputePipelineStateWithFunction:f error:error];
+    pso4_init();
+    MTL4FunctionDescriptor *fd = g_comp4 ? fn4_of(f) : nil;
+    if (![fd isKindOfClass:MTL4LibraryFunctionDescriptor.class])
+        return [g_dev newComputePipelineStateWithFunction:f error:error];
+
+    MTL4ComputePipelineDescriptor *d = [MTL4ComputePipelineDescriptor new];
+    d.computeFunctionDescriptor = fd;
+    id<MTLComputePipelineState> ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil];
+    if (!ps) for (id<MTL4Archive> archive in g_arch4)
+        if ((ps = [archive newComputePipelineStateWithDescriptor:d error:nil])) break;
+    if (ps) {
+        static _Atomic unsigned hits;
+        if (atomic_fetch_add(&hits, 1) < 4) MLOG("compute archive: reused %s", f.name.UTF8String);
+        return ps;
+    }
+
+    ps = [g_dev newComputePipelineStateWithFunction:f error:error];
+    // Capture at utility QoS, with one compiler job at a time. Keep the
+    // first launch playable and put a ceiling on app-private cache growth.
+    static _Atomic unsigned queued;
+    if (ps && g_arch_cap && g_cps_files < 24 && atomic_fetch_add(&queued, 1) < 128) {
+        static dispatch_queue_t capture;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            capture = dispatch_queue_create("dm.nvn.game-compute-archive",
+                dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+        });
+        dispatch_async(capture, ^{ @autoreleasepool {
+            ArchEpoch *ep = ep_enter();
+            if ([ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:nil]) {
+                atomic_fetch_add(&ep->n, 1);
+                atomic_fetch_add(&ep->cs, 1);
+                atomic_fetch_add(&g_arch_new, 1);
+                arch_note_new();
+            }
+            ep_leave(ep);
+        } });
+    }
+    return ps;
 }
 static void arch_compact_finish(void) {   // after the period that holds the recaptured bases is written (arch_write): the old files go once their bases are in the new one
     if (!g_compact_files || !g_compacted) return;
@@ -7113,7 +7163,7 @@ static void warm_task(WarmTask *t) {
             g_warm_done++; return;
         }
         if (t->kind == 2) {
-            NvShader *cs = warm_shader(t->key, 5); NSError *e = nil; id ps = cs ? [g_dev newComputePipelineStateWithFunction:cs->fn error:&e] : nil;
+            NvShader *cs = warm_shader(t->key, 5); NSError *e = nil; id ps = cs ? game_compute_pipeline(cs->fn, &e) : nil;
             if (cs && !ps) MLOG("[RED] background compute pipeline creation failed: %s", e.localizedDescription.UTF8String);
             if (ps) { WarmItem *item = [WarmItem new]; item->kind = 2; item->key = t->key; item->shader = cs; item->object = ps; warm_enqueue(item); g_warm_cps++; }
             g_warm_done++; return;
@@ -10613,7 +10663,7 @@ static void dispatch(const p_dispatch *dp) {
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
-        NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
+        NSError *e = nil; uint64_t bt = bp_now(); ps = game_compute_pipeline(cs->fn, &e);
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
         if (!ps) { MLOG("[RED] failed to create compute pipeline: %s", e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);
