@@ -1,6 +1,6 @@
 # nxnative — iOS 16 / iOS 17 compatibility
 
-**Nintendo Switch native execution for iPhone and iPad, including an iOS/iPadOS 16.1+ legacy Metal backend.** This is [widmonstertony's compatibility fork](https://github.com/widmonstertony/nxnative), maintained on **[`ios16-ios17-compat`](https://github.com/widmonstertony/nxnative/tree/ios16-ios17-compat)**. It also retains the modern Metal 4 target for supported devices on iOS 26 or later.
+**Nintendo Switch native execution for iPhone and iPad, including an iOS/iPadOS 16.1+ legacy Metal backend.** This is [widmonstertony's compatibility fork](https://github.com/widmonstertony/nxnative). Its published fixes are on `main`; device work is also tracked on [`ios16-ios17-compat`](https://github.com/widmonstertony/nxnative/tree/ios16-ios17-compat). It retains the Metal 4 target for supported devices on iOS 26 or later.
 
 Start with the **[iOS 16 / iOS 17 build and installation guide](docs/ios16-ios17.md)** and the **[device compatibility status](docs/fork-status.md)**. An older OS build target does not make every game compatible with every older GPU. The upstream gallery below includes Mac results and is not an iOS 16/17 compatibility list.
 
@@ -8,9 +8,39 @@ Start with the **[iOS 16 / iOS 17 build and installation guide](docs/ios16-ios17
 |---|---|---|
 | iOS 16 / iOS 17 compatibility | iOS / iPadOS **16.1** | Traditional Metal backend; strict per-game resource audit; A10X and M2 have different limits |
 | Modern iPhone / iPad | iOS / iPadOS **26.0** | Explicit Metal 4 target; requires compatible hardware |
-| Switch 2 | No verified iOS target | Dump inspection foundation only; upstream Mac results do not establish iPhone/iPad support |
+| Switch 2 | Per game and device | Targeted iPhone Air and M2 builds; see the play-test limits below |
 
-The former branch name was `ios16-pokemon-za-port`; it was renamed, preserving its history. There is one maintained compatibility branch for all games and both renderer targets. `main` is the upstream baseline. **Source builds are available; this repository does not distribute ready-to-play games or a universal compatibility guarantee.**
+The former branch name was `ios16-pokemon-za-port`; it was renamed, preserving its history. **Source builds are available; this repository does not distribute ready-to-play games or a universal compatibility guarantee.**
+
+## TonTon Gamebox: game fixes and verification
+
+Add each published game fix here with its affected device, what changed, and
+the deepest scene actually verified. A signed install or a successful shader
+build is not a gameplay pass. Keep earlier observations in the
+[device history](docs/fork-status.md) and exact backports in the
+[engine notes](dm/ios/Engines/NxNative/README.md).
+
+| Game | What this fork changed | Verified result and open issues |
+| --- | --- | --- |
+| Mario Kart World | Restored movie texture views, terrain uploads and sparse mappings; fixed black scenery with conditional clears; reduced upload and pipeline work; restored Air's 60 Hz pacing ([movie](https://github.com/widmonstertony/nxnative/commit/3d0a3a0), [clears](https://github.com/widmonstertony/nxnative/commit/381ed5f), [upload cache](https://github.com/widmonstertony/nxnative/commit/e221694), [pacing](https://github.com/widmonstertony/nxnative/commit/e847a4c)) | Air player confirmed the black scenery was gone, but reported low race performance and intermittent race-entry crashes. Air logs still show 1080p input to MetalFX even in handheld mode. On M2, free roam rendered in a prior test; mesh faults and race performance remain open. |
+| Zelda: Ocarina of Time | Corrected opening movie decoding on Metal 3 and handled the offline play-report request that aborted at the end of the opening ([movie](https://github.com/widmonstertony/nxnative/commit/4f25737), [M2](https://github.com/widmonstertony/nxnative/commit/ed552f8), [Air](https://github.com/widmonstertony/nxnative/commit/4ecd063)) | M2 60.62 reaches the save list, but loading the forest save still faults in a GPU render pass. The Air fix is installed; completion of the affected section has not been reverified by the player. |
+| Zelda: Tears of the Kingdom | Restored missing shared-font assets; exposed a real 3D render-scale control and corrected the FPS overlay toggle for data-only games ([controls](https://github.com/widmonstertony/nxnative/commit/86e676d), [overlay](https://github.com/widmonstertony/nxnative/commit/acb19b6)) | Air player confirmed the game opened and later reported less stutter and no FPS overlay. Sustained 60 fps has not been verified. |
+| Pokémon Legends: Z-A, Switch 2 Edition | Filled missing Metal 3 shader variants and added a Metal 4 compute archive path ([shader loading](https://github.com/widmonstertony/nxnative/commit/2d1396b), [pipeline cache](https://github.com/widmonstertony/nxnative/commit/d24d7c2)) | M2 loaded a save and rendered an interior. Neither sustained city performance nor all later scenes are certified. |
+| Pokémon Pokopia | Restored missing graphics libraries and fixed Switch 2 virtual microphone enumeration ([service fix](https://github.com/widmonstertony/nxnative/commit/646c4ab)) | Reached gameplay in device testing; the player reported character-preview rendering defects on Air and M2. |
+| The Witcher 3 | Repaired Air startup after tracing the executable's address-space reservation; verified the exact installed framework ([Air repair](https://github.com/widmonstertony/nxnative/commit/33b0df4)) | Air player confirmed title/game entry. M2 character materials still render incorrectly in some scenes. |
+| Naruto Shippuden: Ultimate Ninja Storm 4 | Fixed the OpenGL ES startup path, framebuffer queries, and NVN/GL texture and fence sharing ([startup](https://github.com/widmonstertony/nxnative/commit/f691081), [framebuffer](https://github.com/widmonstertony/nxnative/commit/2eddd56), [texture sharing](https://github.com/widmonstertony/nxnative/commit/175301f)) | Air player reached battle on one build. Later reports of black characters and another battle-entry crash are still open. |
+| Fate visual novels | Repaired native OpenGL framebuffer entry points needed during story initialization ([framebuffer aliases](https://github.com/widmonstertony/nxnative/commit/845c721)) | Air player verified both title screens display at the correct size and Hollow Ataraxia can enter the story. This does not cover the rest of each title. |
+| Need for Speed Hot Pursuit Remastered | Fixed initial texture content, race button mapping, audio buffering and elapsed game time ([textures](https://github.com/widmonstertony/nxnative/commit/ffed898), [input and audio](https://github.com/widmonstertony/nxnative/commit/16cecc6), [timing](https://github.com/widmonstertony/nxnative/commit/d59fd00)) | Device gameplay confirmed; no long race performance guarantee. |
+| GTA V | Uses the Gamebox mode picker with the separate native iPadOS 16 engine ([mode picker](https://github.com/widmonstertony/nxnative/commit/421e5cd)) | Air player confirmed gameplay and access to per-game settings. |
+| Red Alert 2 and Yuri's Revenge | Added native entry and touch controls: tap for left click, drag to select, two-finger tap for right click ([touch](https://github.com/widmonstertony/nxnative/commit/3cd0d50)) | Old iPad testing confirmed map interaction in the original app. The updated signed Gamebox on that device requires the retail-resource restoration before it can be retested. |
+
+Library changes include [private CloudKit save transport](https://github.com/widmonstertony/nxnative/commit/4fe54cb),
+[independent game engines](https://github.com/widmonstertony/nxnative/commit/2798a14),
+[verified single-file shader images](https://github.com/widmonstertony/nxnative/commit/b51852e),
+and [Air game-paced presentation](https://github.com/widmonstertony/nxnative/commit/75f30d7).
+CloudKit cross-platform delivery is tracked separately from code integration:
+the Mac and Apple TV builds must use the same private container and environment
+as the mobile builds, and live save exchange on those devices remains to be verified.
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
 

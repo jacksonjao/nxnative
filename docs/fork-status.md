@@ -1,12 +1,14 @@
 # iOS 16 / iOS 17 compatibility status
 
-## One maintained compatibility branch
+## Published source and compatibility branch
 
 [`ios16-ios17-compat`](https://github.com/widmonstertony/nxnative/tree/ios16-ios17-compat)
-is the fork's default and only maintained compatibility branch. It was renamed
+is the fork's compatibility branch for ongoing device work. It was renamed
 from `ios16-pokemon-za-port` to describe its shared scope: all games, iOS 16.1/17,
-legacy GPUs and the optional modern Metal 4 target. `main` remains the upstream
-baseline. Historical snapshots are not alternative supported releases.
+legacy GPUs and the optional modern Metal 4 target. Published fixes are
+also synchronized to the fork's `main`. Historical snapshots are not
+alternative supported releases. The [README game table](../README.md#tonton-gamebox-game-fixes-and-verification)
+has the current device evidence.
 Start with the [build and installation guide](ios16-ios17.md).
 
 ## Upstream integration and resource compatibility
@@ -17,8 +19,8 @@ The merged upstream changes include the bounded Need for Speed Bundle 2 reader
 and independent mmap/mprotect failure fixtures; the fork retains its alias
 exposure checks.
 This is a merge, not a rebase or a claim that merely fetching updated the fork.
-Before each further change batch, fetch and merge the latest upstream in a
-clean isolated checkout, resolve conflicts and test both renderer targets.
+Use isolated, pinned upstream builds for new releases. Do not update a deployed
+game's shader chain merely because the fork's source branches are synchronized.
 
 The full integration preserves signed executable mappings and per-game
 frameworks, legacy shader reflection/atomic companions, input semantics,
@@ -37,8 +39,8 @@ The source merge itself did not replace installed applications.
 | `DM_LEGACY_TARGET=m2` | Inherits legacy minimum | Tested M2 iPad capability selection; not an A10X fallback |
 | `DM_IOS_RENDERER=metal4` | iOS/iPadOS 26.0 | Modern backend on compatible hardware; experimental optical-flow interpolation |
 
-Source for other platforms is retained. No Switch 2 iPhone/iPad backend is
-verified; upstream Donkey Kong Bananza Mac results are not an iOS result.
+Source for other platforms is retained. Later Switch 2 phone and iPad results
+are recorded per game in the README; upstream Mac results are not device proof.
 
 ## Device evidence and open work — 2026-11-01
 
