@@ -55,3 +55,15 @@ Apply `ocarina-m2-offline-play-report.patch` to the pinned Ocarina 60.60
 engine's `dm/host/hle_sf.c`, whose SHA-256 is
 `4e37968a18e54f1a00b4bb516665aaa6973cb96cb8d14f83e608b953cd99b6f4`. Relink just the Ocarina framework;
 the shared iOS engine does not use this patch.
+
+## Ocarina of Time: offline play report (Air 60.60)
+
+The signed Air 60.59 launcher reached end of stream and aborted with result
+`0xe15` when the game opened `prepo:u`. The newer upstream engine intercepts
+PlayReport::Send and completes it locally. This older launcher instead
+serves that name through its existing offline responder, limited to
+program `0400486024DEC000`. No report is sent. The game frameworks, shader
+chain and save handling are unchanged.
+
+Apply `ocarina-air-offline-play-report.patch` to `dm/host/hle_sf.c` in the
+pinned Air launcher. The original SHA-256 is `4e37968a18e54f1a00b4bb516665aaa6973cb96cb8d14f83e608b953cd99b6f4`.

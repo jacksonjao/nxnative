@@ -1,0 +1,16 @@
+--- a/dm/host/hle_sf.c
++++ b/dm/host/hle_sf.c
+@@ -36,6 +36,13 @@
+           uint32_t *out, const char *name) {
+     for (size_t k = 0; k < sizeof sf_served / sizeof *sf_served; k++)
+         if (!strncmp(name, sf_served[k], 8)) { *out = sf_new(sf_served[k], 0); LOG("sf: %s → host session %#x (every request succeeds with zeroed output)", sf_served[k], *out); return RES_OK; }
++    // Ocarina requests the PlayReport service at the end of its opening.
++    // Answer with the existing offline session; no report leaves the device.
++    if (!strncmp(name, "prepo:u", 8) && !strcasecmp(DM_GAME_ID, "0400486024DEC000")) {
++        *out = sf_new("prepo:u", 0);
++        LOG("sf: Ocarina prepo:u -> local offline session %#x", *out);
++        return RES_OK;
++    }
+     LOG("[RED] sf: the game connects to service %.8s itself, which the host does not serve", name);
+     return 0xe15u;   // sm ResultNotRegistered
+ }
