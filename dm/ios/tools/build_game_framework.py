@@ -148,8 +148,11 @@ def build(args):
         for suffix in ['patched.bin', 'fixups.tsv', 'gates.tsv', 'obs.tsv', 'cuts.tsv']:
             if not (patched / f'{module}.{suffix}').is_file():
                 raise ValueError(f'missing module input {module}.{suffix}')
-    chain = re.search(r'^#define DMSH_CHAIN "([0-9a-f]+)"',
-                      (ROOT / 'dm/gfx/nvn/dmsh_chain.h').read_text(), re.M).group(1)
+    chain_match = re.search(r'^#define DMSH_CHAIN "([0-9a-f]+)"',
+                            (ROOT / 'dm/gfx/nvn/dmsh_chain.h').read_text(), re.M)
+    if chain_match is None:
+        raise ValueError('missing shader chain identity in dmsh_chain.h')
+    chain = chain_match.group(1)
     name = f'DmGame{title}.framework'
     out = args.output.resolve()
     if out.exists():

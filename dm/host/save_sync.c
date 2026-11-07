@@ -398,7 +398,8 @@ static int fetch_timed(const char *cloud, const char *local, int ms) {   // fron
     if (!j) return -1;
     pthread_mutex_init(&j->mu, NULL); pthread_cond_init(&j->cv, NULL);
     snprintf(j->cloud, sizeof j->cloud, "%s", cloud);
-    if (snprintf(j->local, sizeof j->local, "%s.fetch.XXXXXX", local) >= sizeof j->local) {
+    int len = snprintf(j->local, sizeof j->local, "%s.fetch.XXXXXX", local);
+    if (len < 0 || (size_t)len >= sizeof j->local) {
         pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); return -1;
     }
     int fd = mkstemp(j->local);

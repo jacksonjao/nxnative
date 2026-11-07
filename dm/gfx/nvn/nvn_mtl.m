@@ -12661,6 +12661,8 @@ static uint64_t snap_take(const tex_t *t) {
             if (!g_snap_alloc[i] || !g_snap_cb[i]) MDIE("present snapshots: no command allocator / buffer");
         }
     }
+    id<MTLSharedEvent> event = g_snap_ev;
+    if (!event) MDIE("present snapshots: no shared event");
     id<MTLTexture> dst = g_snap[k].tex;
     if (!dst || dst.width != src.width || dst.height != src.height || dst.pixelFormat != src.pixelFormat) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
@@ -12676,6 +12678,7 @@ static uint64_t snap_take(const tex_t *t) {
     }
     [g_snap_alloc[k] reset];
     id<MTL4CommandBuffer> cb = g_snap_cb[k];
+    if (!cb) MDIE("present snapshots: missing command buffer for slot %d", k);
     [cb beginCommandBufferWithAllocator:g_snap_alloc[k]];
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work and the slot's last blit to the screen
@@ -12687,11 +12690,11 @@ static uint64_t snap_take(const tex_t *t) {
         if (on_sub_thread()) rec_publish();   // what the submitting thread recorded outside a submission goes first
         rec_blk *b = rec_own_begin();
         rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);
-        r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(g_snap_ev); r->a[1] = v;
+        r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(event); r->a[1] = v;
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        pthread_mutex_lock(&g_res_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_mu);
+        pthread_mutex_lock(&g_res_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:event value:v]; pthread_mutex_unlock(&g_res_mu);
         atomic_store(&g_snap_cmt, v);
     }
     g_snap[k].ev = v;

@@ -8,7 +8,8 @@
 #define HOST_IMAGE_SENTINEL 17
 #endif
 
-__attribute__((used,section("__DATA,__dm_host_test")))
+// Keep the fixture's one-word section exact when ASan instruments globals.
+__attribute__((used,section("__DATA,__dm_host_test"),no_sanitize("address")))
 static const unsigned sentinel = HOST_IMAGE_SENTINEL;
 
 unsigned host_image_probe(void) {

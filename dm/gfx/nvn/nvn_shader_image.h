@@ -27,7 +27,7 @@ static BOOL nvn_shader_image_open(NSString *folder, NSData *stamp) {
     if (!image) return NO;
     const img_ent *entry = image->e[0].b == image->n - 1 && !image->damaged ?
         nvn_shader_find(image, "inputs.tsv") : NULL;
-    unsigned char copy[4096];
+    unsigned char copy[4096] = {0};
     if (!entry || !entry->type || entry->b != stamp.length ||
         !romfs_image_read(image->fd, copy, stamp.length, (off_t)entry->a) ||
         memcmp(copy, stamp.bytes, stamp.length)) {

@@ -37,7 +37,10 @@ int main(void) {
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); NSError *err = nil;
         id<MTLLibrary> lib = [dev newLibraryWithSource:@(k_msl) options:nil error:&err]; if (!lib) { printf("MSL: %s\n", err.localizedDescription.UTF8String); return 1; }
-        id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"rd"] error:&err];
+        id<MTLFunction> rd = [lib newFunctionWithName:@"rd"];
+        if (!rd) { fprintf(stderr, "Missing rd Metal function\n"); return 1; }
+        id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:rd error:&err];
+        if (!ps) { fprintf(stderr, "Pipeline: %s\n", err.localizedDescription.UTF8String ?: "unavailable"); return 1; }
         id<MTLCommandQueue> q = [dev newCommandQueue];
         const uint32_t nbx = 256, nby = 128, n = nbx * nby, W = nbx * 4, H = nby * 4;
         int fails = 0; const char *ln[5] = {"L0", "L1a", "L1b", "L2", "L3"};

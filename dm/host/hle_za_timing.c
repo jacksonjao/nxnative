@@ -304,7 +304,7 @@ static void za_interval(uint64_t *regs, int param) {
     // native adaptive mode is on. Normally the elapsed comparisons chose 4 first.
     if (native[1] && elapsed > 1000000000ll) selected = 4;
     g_za_interval_seen = 1;
-    g_za.interval_calls++; g_za.configured = (int8_t)native[0]; g_za.adaptive = native[1] != 0;
+    g_za.interval_calls++; g_za.configured = native[0] < 128 ? native[0] : (int)native[0] - 256; g_za.adaptive = native[1] != 0;
     g_za.last_elapsed = elapsed; g_za.forwarded = forwarded; g_za.selected = selected;
     g_za.codes[selected >= 0 && selected <= 4 ? selected : 5]++;
     pthread_mutex_unlock(&g_za_mu);

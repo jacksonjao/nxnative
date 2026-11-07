@@ -77,6 +77,14 @@ static int c0_ssbo_base(int stage) {
 #define MLOG(...) do { fprintf(stderr, "[dm] [nvn-mtl] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define MDIE(...) do { MLOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
+// These renderer tables cannot continue with a partial resize. Fail at the
+// allocation, rather than losing the old pointer and crashing on its next use.
+static void *legacy_grow(void *old, size_t bytes) {
+    void *next = realloc(old, bytes);
+    if (!next) MDIE("cannot grow renderer table to %zu bytes", bytes);
+    return next;
+}
+
 static void warm_start(void);
 static void warm_claim(void);
 static _Atomic int g_prepare_state, g_prepare_frontend;
@@ -468,12 +476,12 @@ void bf_want_note(const char *key) {
     if (!g_bf_want_loaded) {
         FILE *f = fopen(path, "r"); char line[64];
         if (f) { while (fgets(line, sizeof line, f)) { char *e = strpbrk(line, "\r\n"); if (e) *e = 0; if (strlen(line) != 16) continue;
-                if (g_bf_want_n == g_bf_want_cap) { g_bf_want_cap = g_bf_want_cap ? g_bf_want_cap * 2 : 64; g_bf_want_keys = realloc(g_bf_want_keys, g_bf_want_cap * sizeof *g_bf_want_keys); }
+                if (g_bf_want_n == g_bf_want_cap) { g_bf_want_cap = g_bf_want_cap ? g_bf_want_cap * 2 : 64; g_bf_want_keys = legacy_grow(g_bf_want_keys, g_bf_want_cap * sizeof *g_bf_want_keys); }
                 g_bf_want_keys[g_bf_want_n++] = strdup(line); } fclose(f); }
         g_bf_want_loaded = 1;
     }
     for (size_t i = 0; i < g_bf_want_n; i++) if (!strcmp(g_bf_want_keys[i], key)) { pthread_mutex_unlock(&g_bf_want_mu); return; }
-    if (g_bf_want_n == g_bf_want_cap) { g_bf_want_cap = g_bf_want_cap ? g_bf_want_cap * 2 : 64; g_bf_want_keys = realloc(g_bf_want_keys, g_bf_want_cap * sizeof *g_bf_want_keys); }
+    if (g_bf_want_n == g_bf_want_cap) { g_bf_want_cap = g_bf_want_cap ? g_bf_want_cap * 2 : 64; g_bf_want_keys = legacy_grow(g_bf_want_keys, g_bf_want_cap * sizeof *g_bf_want_keys); }
     g_bf_want_keys[g_bf_want_n++] = strdup(key);
     FILE *f = fopen(path, "a"); if (f) { fprintf(f, "%s\n", key); fclose(f); }
     pthread_mutex_unlock(&g_bf_want_mu);
@@ -649,7 +657,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     }
     if (!buf) { pool_nocopy_failure(a, b, pg); MDIE("Cannot register no-copy memory pool %p+%#llx", mem, (unsigned long long)size); }
     pthread_mutex_lock(&g_mu);
-    if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
+    if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = legacy_grow(g_pools, g_cap * sizeof *g_pools); }
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
     g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, legacy_buffer_gpu(buf), mem, 0};   // not in the residency set yet: put in the first time it is addressed (pool_res)
     g_pool_adds++;
@@ -680,7 +688,7 @@ static int pidx_cmp(const void *a, const void *b) { uintptr_t x = g_pools[*(cons
 static int pool_find(uint64_t addr, uint64_t len) {
     if (g_plast >= 0 && g_plast < g_npool && addr >= g_pools[g_plast].lo && addr + len <= g_pools[g_plast].hi) return g_plast;
     if (!g_pidx_ok) {
-        if (g_pidx_cap < g_npool) { g_pidx_cap = g_npool * 2; g_pidx = realloc(g_pidx, (size_t)g_pidx_cap * sizeof *g_pidx); }
+        if (g_pidx_cap < g_npool) { g_pidx_cap = g_npool * 2; g_pidx = legacy_grow(g_pidx, (size_t)g_pidx_cap * sizeof *g_pidx); }
         for (int i = 0; i < g_npool; i++) g_pidx[i] = i;
         qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1;
     }
@@ -1261,7 +1269,7 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 }
 
 static void post(post_op o) {
-    if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc(g_post, g_postcap * sizeof *g_post); }
+    if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = legacy_grow(g_post, g_postcap * sizeof *g_post); }
     g_post[g_npost++] = o;
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, NULL}); }
@@ -2052,7 +2060,7 @@ static void up_blit_add(id<MTLBuffer> src, size_t off, size_t row, size_t image,
                         id<MTLTexture> dst, NSUInteger slice, NSUInteger level) {
     if (g_nup_blits == g_up_blitcap) {
         g_up_blitcap = g_up_blitcap ? g_up_blitcap * 2 : 256;
-        g_up_blits = realloc(g_up_blits, g_up_blitcap * sizeof *g_up_blits);
+        g_up_blits = legacy_grow(g_up_blits, g_up_blitcap * sizeof *g_up_blits);
     }
     g_up_blits[g_nup_blits++] = (up_blit){src, off, row, image, size, dst, slice, level, 0};
 }
@@ -2177,7 +2185,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                     pp[0] = (uint32_t)(stg_off + off); pp[1] = (uint32_t)pitch;
                     pp[2] = (uint32_t)(stg_off + abase + aoff); pp[3] = nbx * 16;
                     pp[4] = nbx; pp[5] = nby; pp[6] = (uint32_t)akind;
-                    if (g_nup_asts == g_up_astcap) { g_up_astcap = g_up_astcap ? g_up_astcap * 2 : 256; g_up_asts = realloc(g_up_asts, g_up_astcap * sizeof *g_up_asts); }
+                    if (g_nup_asts == g_up_astcap) { g_up_astcap = g_up_astcap ? g_up_astcap * 2 : 256; g_up_asts = legacy_grow(g_up_asts, g_up_astcap * sizeof *g_up_asts); }
                     g_up_asts[g_nup_asts++] = (up_ast){stg, q, qoff, nbx, nby};
                     up_blit_add(stg, stg_off + abase + aoff, (size_t)nbx * 16, (size_t)nbx * 16 * nby, MTLSizeMake(w, h, 1), mt, y, l);
                     aoff += (size_t)nbx * nby * 16;
@@ -2187,7 +2195,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                     size_t qoff; id<MTLBuffer> q = up_param_alloc(&qoff);
                     if (!v || !q) { enc_ok = 0; break; }
                     uint32_t *pp = (uint32_t *)((uint8_t *)q.contents + qoff); pp[0] = (uint32_t)(stg_off + off); pp[1] = (uint32_t)pitch; pp[2] = w; pp[3] = h; pp[4] = (uint32_t)bcd_fmt(t->d.format);
-                    if (g_nup_decs == g_up_deccap) { g_up_deccap = g_up_deccap ? g_up_deccap * 2 : 256; g_up_decs = realloc(g_up_decs, g_up_deccap * sizeof *g_up_decs); }
+                    if (g_nup_decs == g_up_deccap) { g_up_deccap = g_up_deccap ? g_up_deccap * 2 : 256; g_up_decs = legacy_grow(g_up_decs, g_up_deccap * sizeof *g_up_decs); }
                     g_up_decs[g_nup_decs++] = (up_dec){stg, q, 0, qoff, (w + 3) / 4, (h + 3) / 4, v}; [g_up_texs addObject:v];   // Completion owns the view only until this upload CB finishes; the base texture, not this view, is resident.
                 } else
                 up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
@@ -2878,7 +2886,7 @@ static void pg_sub_begin(uint64_t fence) {   // This submission uses block fence
 static pg_pass *pg_new(int kind, int nslot) {
     if (!pg_on() || g_pg_used + nslot > PG_SLOTS) return NULL;
     uint64_t f = atomic_load(&g_cur_frame); if (f != g_pg_frame) { g_pg_frame = f; g_pg_idx = 0; }
-    if (g_pg_np == g_pg_cap) { g_pg_cap = g_pg_cap ? g_pg_cap * 2 : 128; g_pg_pass = realloc(g_pg_pass, g_pg_cap * sizeof *g_pg_pass); }
+    if (g_pg_np == g_pg_cap) { g_pg_cap = g_pg_cap ? g_pg_cap * 2 : 128; g_pg_pass = legacy_grow(g_pg_pass, g_pg_cap * sizeof *g_pg_pass); }
     pg_pass *p = &g_pg_pass[g_pg_np++]; memset(p, 0, sizeof *p);
     p->frame = f; p->pass = g_stat_pass; p->idx = g_pg_idx++; p->kind = kind; p->slot = (int)g_pg_used; p->draws = -(int)g_stat_draw;
     g_pg_used += nslot;
@@ -3842,7 +3850,7 @@ static NvShader *shader_load(NSString *pc, int stage) {
         for (int i = 0; i < o->rf.nb; i++) max_aid = MAX(max_aid, o->rf.b[i].aid);
         o->arg_len = o->ae.encodedLength;
         if (!o->ae || !o->arg_len || (g_legacy_direct_arguments &&
-            (o->arg_len != (NSUInteger)(8 * (max_aid + 1)) || (o->arg_len & 7))))
+            (o->arg_len != 8 * ((NSUInteger)max_aid + 1) || (o->arg_len & 7))))
             MDIE("着色器 %s 参数块布局异常：encodedLength=%lu maxAid=%d", o->key, (unsigned long)o->arg_len, max_aid);
         if (g_legacy_direct_arguments) nvn_storage_access_promote(&o->rf, argument, o->arg_len, o->key, o->stage);
         else nvn_argument_private_access(&o->rf, argument);
@@ -3986,7 +3994,7 @@ static void treg_drop_pool_views(const void *pool) {
 void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     int id_ = tid; if (id_ < 0) return;
     pthread_mutex_lock(&g_rmu);
-    if (id_ >= g_ntreg) { int n = id_ + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
+    if (id_ >= g_ntreg) { int n = id_ + 1024; g_treg = legacy_grow(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     g_reg_gen++;
     // Keep the base view conservative: a present/readback/upload CB may still
     // hold an unsafe reference and those independent CBs do not signal g_done.
@@ -4009,8 +4017,8 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
 void mtl_reg_samp(int sid, const samp_par *sp) {
     int id_ = sid; if (id_ < 0) return;
     pthread_mutex_lock(&g_rmu);
-    if (id_ >= g_nsreg) { int n = id_ + 256; g_sreg = realloc(g_sreg, n * sizeof *g_sreg); g_sreg_ok = realloc(g_sreg_ok, n); g_sview = realloc(g_sview, n * sizeof *g_sview); g_srid = realloc(g_srid, n * sizeof *g_srid);
-        g_sview_w = realloc(g_sview_w, n * sizeof *g_sview_w); g_srid_w = realloc(g_srid_w, n * sizeof *g_srid_w); g_sbk = realloc(g_sbk, n * sizeof *g_sbk);
+    if (id_ >= g_nsreg) { int n = id_ + 256; g_sreg = legacy_grow(g_sreg, n * sizeof *g_sreg); g_sreg_ok = legacy_grow(g_sreg_ok, n); g_sview = legacy_grow(g_sview, n * sizeof *g_sview); g_srid = legacy_grow(g_srid, n * sizeof *g_srid);
+        g_sview_w = legacy_grow(g_sview_w, n * sizeof *g_sview_w); g_srid_w = legacy_grow(g_srid_w, n * sizeof *g_srid_w); g_sbk = legacy_grow(g_sbk, n * sizeof *g_sbk);
         memset(g_sview_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview_w); memset(g_srid_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid_w);
         memset(g_sreg_ok + g_nsreg, 0, n - g_nsreg); memset(g_sview + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview); memset(g_srid + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid); g_nsreg = n; }
     if (g_sview[id_]) {
@@ -4915,7 +4923,12 @@ static int pso_parallel_on(void) {
     }
     return on;
 }
-static int pso_pend_find(const pso_key *k) { for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && !memcmp(&g_pp[i].k, k, sizeof *k)) return i; return -1; }
+static int pso_key_bytes_equal(const pso_key *a, const pso_key *b) {
+    // Match the existing cache's byte identity, including the exact float bits;
+    // pso_key_fill zero-initializes the key before assigning its fields.
+    return !memcmp(a, b, sizeof *a); // NOLINT(bugprone-suspicious-memory-comparison)
+}
+static int pso_pend_find(const pso_key *k) { for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && pso_key_bytes_equal(&g_pp[i].k, k)) return i; return -1; }
 static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // Called by the submit thread: kick only if it is neither in the cache nor in the table
     if (hm_get_id(&g_pso, k)) return;
     pthread_mutex_lock(&g_pp_mu);
@@ -5036,7 +5049,12 @@ static int warm_row(NSString *line, NSMutableDictionary<NSString *, NvShader *> 
         if (!vs || (fkey.length && !fs)) return 1;
         id<MTLFunction> fsfn = nil;
         if (sk.fz) {
-            if (sk.fz_desc.kind == 1 && fs) { int fx[32]; for (int i = 0; i < 32; i++) fx[i] = sk.fz_desc.fx[i]; fsfn = bf_fn(fs, fx, sk.fz_desc.fbmask, sk.k.lmap); }
+            if (sk.fz_desc.kind == 1 && fs) {
+                int fx[32];
+                // The signed cache field uses -1 for a missing specialization.
+                for (int i = 0; i < 32; i++) fx[i] = sk.fz_desc.fx[i]; // NOLINT(bugprone-signed-char-misuse)
+                fsfn = bf_fn(fs, fx, sk.fz_desc.fbmask, sk.k.lmap);
+            }
             if (!fsfn) { g_warm_skip_fz++; return 2; }
         }
         pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)fsfn;
@@ -6367,7 +6385,7 @@ static void pso_predict_rest(void) {
                 if (v == 2 && !sfull) continue; if (v == 3 && (!dfull || !sfull)) continue;
                 pso_key k; pso_key_fill(&k, vs, fs, cf, dv[v], sv[v], samples, 0);
                 if (hm_get_id(&g_pso, &k)) continue;
-                int dup = 0; for (int i = 0; i < (v ? nb : na) && !dup; i++) dup = !memcmp(&(v ? qb : qa)[i].k, &k, sizeof k);
+                int dup = 0; for (int i = 0; i < (v ? nb : na) && !dup; i++) dup = pso_key_bytes_equal(&(v ? qb : qa)[i].k, &k);
                 if (dup) continue;
                 if (!v && na < QN) { qa[na].k = k; qa[na].vs = (__bridge void *)vs; qa[na].fs = (__bridge void *)fs; na++; }
                 else if (v && nb < QN) { qb[nb].k = k; qb[nb].vs = (__bridge void *)vs; qb[nb].fs = (__bridge void *)fs; nb++; }
@@ -6555,14 +6573,14 @@ static const uint8_t **g_sdx_op; static uint32_t g_sdx_nop, g_sdx_opcap;
 static uint32_t g_exec_seq;   // Sequence number of the current operation during replay
 static uint64_t g_pp_slot[6][NTEX + 32]; static const prog_t *g_pp_prog, *g_pp_cprog; static const p_set_rt *g_pp_rt; static uint32_t g_pp_rtseq;
 static uint32_t *g_rtx_seq, *g_drx_seq; static uint32_t g_rtx_n, g_rtx_cap, g_drx_n, g_drx_cap;   // This submit's SET_RT / draw sequence number tables (used by the pre-screen of the readable tile merge)
-static void seq_push(uint32_t **v, uint32_t *n, uint32_t *cap, uint32_t x) { if (*n == *cap) { *cap = *cap ? *cap * 2 : 1024; *v = realloc(*v, *cap * sizeof **v); } (*v)[(*n)++] = x; }
-static void sdx_ev_add(sdx_ev e) { if (sdx_bucket(e.ser, 0) < 0) return; if (g_sdx_n == g_sdx_cap) { g_sdx_cap = g_sdx_cap ? g_sdx_cap * 2 : 4096; g_sdx = realloc(g_sdx, g_sdx_cap * sizeof *g_sdx); g_sdx_tmp = realloc(g_sdx_tmp, g_sdx_cap * sizeof *g_sdx); } g_sdx[g_sdx_n++] = e; }
+static void seq_push(uint32_t **v, uint32_t *n, uint32_t *cap, uint32_t x) { if (*n == *cap) { *cap = *cap ? *cap * 2 : 1024; *v = legacy_grow(*v, *cap * sizeof **v); } (*v)[(*n)++] = x; }
+static void sdx_ev_add(sdx_ev e) { if (sdx_bucket(e.ser, 0) < 0) return; if (g_sdx_n == g_sdx_cap) { g_sdx_cap = g_sdx_cap ? g_sdx_cap * 2 : 4096; g_sdx = legacy_grow(g_sdx, g_sdx_cap * sizeof *g_sdx); g_sdx_tmp = legacy_grow(g_sdx_tmp, g_sdx_cap * sizeof *g_sdx); } g_sdx[g_sdx_n++] = e; }
 static void sdx_lvsl(const view_t *v, int hv, uint16_t *lv, uint16_t *sl) { *lv = (uint16_t)(hv && v->set_levels ? v->base_level : 0); *sl = (uint16_t)(hv && v->set_layers ? v->min_layer : 0); }
 static void sdx_walk(const uint8_t *p, int depth) {
     if (depth > 64) { g_sdx_ok = 0; return; }
     for (uint32_t guard = 0; guard < 4000000 && p && g_sdx_ok; guard++) {
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
-        if (g_sdx_nop == g_sdx_opcap) { g_sdx_opcap = g_sdx_opcap ? g_sdx_opcap * 2 : 16384; g_sdx_op = realloc(g_sdx_op, g_sdx_opcap * sizeof *g_sdx_op); }
+        if (g_sdx_nop == g_sdx_opcap) { g_sdx_opcap = g_sdx_opcap ? g_sdx_opcap * 2 : 16384; g_sdx_op = legacy_grow(g_sdx_op, g_sdx_opcap * sizeof *g_sdx_op); }
         uint32_t seq = g_sdx_nop; g_sdx_op[g_sdx_nop++] = p;
         switch (h.op) {
             case OP_END: return;
@@ -6902,7 +6920,7 @@ static void defer_replay(void) {
     for (int gi, after = 0; (gi = defer_next(1, after)) >= 0;) { defer_t *d = &g_defer_slots[gi]; after = d->born;   // In creation order: the groups' P ranges do not overlap and are arranged in sequence, so the group order is the original draw order
         g_defer_cur = d; if (d->reset_between) g_vis_counting = 0;
         { static int once; if (!once++) MLOG("推迟合并通道：首例 通道 %llu，组 %d 回放绘制 %d 次", g_stat_pass, gi, d->n); }   // With multiple groups, several groups may already have been created before the first replay, so it cannot be judged by g_defer_n == 1
-        for (int i = 0; i < d->n; i++) { defer_snap *z = &d->snap[i]; static uint8_t lm[8]; for (int j = 0; j < 8; j++) lm[j] = d->lmap[j] == 0xff || d->lmap[j] >= 8 ? 0xff : z->pm[d->lmap[j]];
+        for (int i = 0; i < d->n; i++) { defer_snap *z = &d->snap[i]; static uint8_t lm[8]; for (int j = 0; j < 8; j++) lm[j] = d->lmap[j] >= 8 ? 0xff : z->pm[d->lmap[j]];
             memcpy(&S, z->S_, sizeof S); args_dirty_all(); R.sc = z->sc; R.has_sc = z->has_sc; g_pso_dirty = g_dss_dirty = 1; prog_resolve(); g_pso_lmap = lm; draw(z->idx ? NULL : &z->dw, z->idx ? &z->di : NULL); }
         defer_release_one(d);
     }
@@ -7040,7 +7058,7 @@ q_found:
     // the target space of an upstream group = this render pass's targets = the new group's P targets, and the snapshot's mapping is composed as pm' = upstream lmap o pm; the upstream clears are already in R and are carried along with the new group below
     for (int gi, after = 0; (gi = defer_next(1, after)) >= 0;) { defer_t *d = &g_defer_slots[gi]; after = d->born; if (d == &g_defer) continue;
         for (int k = 0; k < 8; k++) if (d->lmap[k] != 0xff && d->lmap[k] != k) { g_defer.reason = 18; goto fail; }   // Only merge in upstream groups with an identity mapping (see defer_q_superset)
-        for (int i = 0; i < d->n; i++) { defer_snap z = d->snap[i]; uint8_t pm[8]; for (int k = 0; k < 8; k++) pm[k] = d->lmap[k] == 0xff || d->lmap[k] >= 8 ? 0xff : z.pm[d->lmap[k]];
+        for (int i = 0; i < d->n; i++) { defer_snap z = d->snap[i]; uint8_t pm[8]; for (int k = 0; k < 8; k++) pm[k] = d->lmap[k] >= 8 ? 0xff : z.pm[d->lmap[k]];
             memcpy(z.pm, pm, 8); g_defer.snap[g_defer.n++] = z; }
         g_defer.reset_between |= d->reset_between; d->n = 0; defer_release_one(d); } if (!defer_take(dw, di)) { defer_release_one(&g_defer); return; }
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0; PD("G %llu 成立 组 %d P→Q draws=%d", g_stat_pass + 1, slot, draws);
@@ -8258,7 +8276,9 @@ frz_plain:;
     if (moff != g_ui_moff) { g_ui_moff = moff; g_args_dirty[0] = 1; }
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1] + vo, S.vp[0][2], S.vp[0][3] * vs, S.dr[0], S.dr[1]} : (MTLViewport){0, vo, tw, th * vs, 0, 1};
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
-      if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
+      MTLViewport p = g_ed.vp;
+      if (!(g_ed.ok & ED_VP) || p.originX != v.originX || p.originY != v.originY || p.width != v.width ||
+          p.height != v.height || p.znear != v.znear || p.zfar != v.zfar) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc) {
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = (long)R.sc.x + R.sc.w, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
@@ -8298,7 +8318,7 @@ frz_plain:;
             if (g_vis_cur < 0 || g_vis_cur_pass != g_pass.serial) {
                 if (g_vis_n >= VIS_SLOTS) RED_ONCE(35, "可见性槽用尽");
                 else { g_vis_cur = (int)g_vis_n++; g_vis_cur_pass = g_pass.serial;
-                    if (g_nvs == g_vscap) { g_vscap = g_vscap ? g_vscap * 2 : 64; g_vs = realloc(g_vs, g_vscap * sizeof *g_vs); }
+                    if (g_nvs == g_vscap) { g_vscap = g_vscap ? g_vscap * 2 : 64; g_vs = legacy_grow(g_vs, g_vscap * sizeof *g_vs); }
                     g_vs[g_nvs++] = (vis_slot){(void *)CFBridgingRetain(g_vis), (uint32_t)g_vis_cur}; }
             }
             if (g_vis_cur >= 0 && g_enc_vis != g_vis_cur + 1) { enc_r_visibility(en, MTLVisibilityResultModeCounting, (NSUInteger)g_vis_cur * 8); g_enc_vis = g_vis_cur + 1; }
@@ -9785,8 +9805,8 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
-    static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
-    if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
+    static MTLViewport last_vp;   // Log viewport changes for the real-device screen_check.py aspect-ratio check.
+    if (last_vp.originX != vp.originX || last_vp.originY != vp.originY || last_vp.width != vp.width || last_vp.height != vp.height) { last_vp = vp;
         MLOG("出图视口 %.0f,%.0f %.0fx%.0f / 画布 %.0fx%.0f（游戏画面 %lux%lu）", vp.originX, vp.originY, vp.width, vp.height, dw, dh, (unsigned long)src.width, (unsigned long)src.height); }
     rp.colorAttachments[0].texture = dst; rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);

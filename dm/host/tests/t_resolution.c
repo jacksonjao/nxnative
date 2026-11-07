@@ -3,6 +3,9 @@
 #include "../hle_fpslock.c"
 static module_t modules[1];
 module_t *g_mod = modules; int g_nmod = 1;
+// This fixture exercises memory policy, not the passage of wall or guest time.
+uint64_t now_ns(void) { return 1; }
+uint64_t guest_ns(void) { return now_ns(); }
 static int writes;
 void dm_guest_write_prepare(void *p, size_t n) { (void)p; (void)n; writes++; }
 static int checks, failed;

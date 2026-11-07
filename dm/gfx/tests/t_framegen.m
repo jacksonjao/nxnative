@@ -22,15 +22,18 @@ static id<MTLTexture> input(int x,BOOL cut) {
 static id<MTLTexture> encode(DmFrameGenerator *fg,id<MTLTexture> src,double dt,int slot) {
     id<MTL4CommandAllocator> al=[dev newCommandAllocator]; id<MTL4CommandBuffer> cb=[dev newCommandBuffer];
     id<MTLResidencySet> rs=[dev newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
+    id<MTLSharedEvent> e=[dev newSharedEvent];
+    if (!al || !cb || !rs || !e || !src) { fprintf(stderr,"Could not allocate Metal framegen fixture\n"); exit(1); }
     [rs addAllocation:src];[rs commit];[queue addResidencySet:rs];[queue addResidencySet:fg.residency];
     [cb beginCommandBufferWithAllocator:al]; const NSUInteger r[]={0,0,256,128};
     id<MTLTexture> out=[fg encode:cb source:src rect:r interval:dt slot:slot];[cb endCommandBuffer];
-    id<MTLSharedEvent> e=[dev newSharedEvent]; [queue commit:&cb count:1];[queue signalEvent:e value:1];
+    [queue commit:&cb count:1];[queue signalEvent:e value:1];
     CHECK([e waitUntilSignaledValue:1 timeoutMS:10000],"GPU completes flow work");
     [queue removeResidencySet:rs];return out;
 }
 static unsigned char *pixels(id<MTLTexture> t) {
     id<MTLBuffer> b=[dev newBufferWithLength:256*128*4 options:MTLResourceStorageModeShared];
+    if (!b || !t) { fprintf(stderr,"Missing Metal framegen readback resource\n"); exit(1); }
     id<MTLCommandBuffer> cb=[readq commandBuffer];id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
     [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(256,128,1) toBuffer:b destinationOffset:0 destinationBytesPerRow:256*4 destinationBytesPerImage:256*128*4];
     [e endEncoding];[cb commit];[cb waitUntilCompleted];
@@ -38,7 +41,8 @@ static unsigned char *pixels(id<MTLTexture> t) {
 }
 int main(int argc,char **argv){@autoreleasepool {
     (void)argv; if(argc>1)testFormat=MTLPixelFormatBGRA8Unorm;
-    setbuf(stdout,NULL);dev=MTLCreateSystemDefaultDevice();queue=[dev newMTL4CommandQueue];readq=[dev newCommandQueue];
+    if (setvbuf(stdout,NULL,_IONBF,0)) return 1;
+    dev=MTLCreateSystemDefaultDevice();queue=[dev newMTL4CommandQueue];readq=[dev newCommandQueue];
     CHECK(queue!=nil,"real Metal 4 queue available");if(!queue)return 1;
     DmFrameGenerator *fg=[[DmFrameGenerator alloc]initWithDevice:dev width:256 height:128 format:testFormat];
     CHECK(fg!=nil,"production interpolation pipelines created");if(!fg)return 1;

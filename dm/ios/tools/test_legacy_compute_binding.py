@@ -1,6 +1,6 @@
 """Exercise the actual legacy OP_BIND_PROGRAM handler, including Witcher capture."""
 from pathlib import Path
-import re,subprocess,tempfile,unittest
+import subprocess,tempfile,unittest
 ROOT=Path(__file__).resolve().parents[3]
 class BindingTests(unittest.TestCase):
  def test_captured_and_interleaved_stage_bindings(self):

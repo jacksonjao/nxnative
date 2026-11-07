@@ -184,10 +184,10 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '10.0.x'   # dm/gfx/tools/dmsh_xlate_bin targets net10.0
-      - name: Install spirv-val   # spirv-cross is the in-repo build (dm/gfx/tools/spirv_cross_bin)
+      - name: Install spirv-val and glslangValidator   # spirv-cross is built in-repo
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
-        run: brew install spirv-tools
+        run: brew install spirv-tools glslang
       - name: Run the test files
         env:
           DM_GAME: ${{ env.GAME }}   # test_tbdr_budget runs a tool that needs a profile

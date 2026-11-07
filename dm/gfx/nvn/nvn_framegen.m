@@ -5,6 +5,11 @@
 #include <stdio.h>
 #include "nvn_framegen_kernels.h"
 
+static id<MTLComputePipelineState> framegen_pipeline(id<MTLDevice> device, id<MTLLibrary> library, NSString *name, NSError **error) {
+    id<MTLFunction> fn = [library newFunctionWithName:name];
+    return fn ? [device newComputePipelineStateWithFunction:fn error:error] : nil;
+}
+
 @implementation DmFrameGenerator {
     id<MTLDevice> _device;
     id<MTLTexture> _color[2], _luma[2][3], _flow[2][3], _output[3];
@@ -29,13 +34,13 @@
     MTLCompileOptions *options=[MTLCompileOptions new]; options.mathMode=MTLMathModeSafe;
     id<MTLLibrary> lib=[device newLibraryWithSource:@(dm_framegen_msl) options:options error:&e];
     if(lib) {
-        _cut=[device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_cut"] error:&e];
-        _pyramid=[device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_luma"] error:&e];
-        _match=[device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_match"] error:&e];
-        _interpolate=[device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fg_interpolate"] error:&e];
+        _cut=framegen_pipeline(device,lib,@"fg_cut",&e);
+        _pyramid=framegen_pipeline(device,lib,@"fg_luma",&e);
+        _match=framegen_pipeline(device,lib,@"fg_match",&e);
+        _interpolate=framegen_pipeline(device,lib,@"fg_interpolate",&e);
     }
     if(!_residency || !_pyramid || !_match || !_interpolate || !_cut) {
-        fprintf(stderr,"[dm] [framegen] optical flow unavailable: %s\n",e.localizedDescription.UTF8String); return nil;
+        fprintf(stderr,"[dm] [framegen] optical flow unavailable: %s\n",e.localizedDescription.UTF8String ?: "missing Metal resource or function"); return nil;
     }
     MTLTextureUsage rw=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;
     for(int i=0;i<2;i++) {

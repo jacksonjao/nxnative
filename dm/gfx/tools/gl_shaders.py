@@ -175,7 +175,7 @@ def lower_constant_sampler_arrays(src):
             names = [prefix + str(i) for i in range(size)]
             # Names are reserved in the original source before substitution.
             src = src.replace(declaration, '\n'.join(match[1] + n + ';' for n in names), 1)
-            src = re.sub(use, lambda m: names[indices[m[1].strip()]], src)
+            src = re.sub(use, lambda m, names=names, indices=indices: names[indices[m[1].strip()]], src)
             aliases.update({n: (name, i, size) for i, n in enumerate(names)})
     return src, aliases
 

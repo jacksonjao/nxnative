@@ -32,7 +32,8 @@ MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_s
 # a fixture test_image_atomic_bounds.py builds itself (t_atomic_return), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
 # its translated fixtures), and t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml)
 # t_framegen_screen supplies the host screen stub linked by t_framegen_present.
-NOT_RUN = t_framegen_screen t_host_stubs t_present_rescue_focus t_atomic_return t_geometry_primitive_id t_gpuprof
+# t_mkw_terrain_pair requires two Metal shader source paths supplied by the caller.
+NOT_RUN = t_framegen_screen t_host_stubs t_present_rescue_focus t_atomic_return t_geometry_primitive_id t_gpuprof t_mkw_terrain_pair
 RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
@@ -48,8 +49,10 @@ t_transform_feedback: t_transform_feedback.m $(MTL_T_DEP)
 .PHONY: check_t_transform_feedback
 check_t_transform_feedback: t_transform_feedback
 	DM_TEST_TRANSFORM_FEEDBACK=$(CURDIR)/t_transform_feedback MTL_DEBUG_LAYER=1 python3 -m unittest test_transform_feedback.py
-t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(GFX_H)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(FW)
+t_mkw_terrain_pair: t_mkw_terrain_pair.m
+	clang $(CFLAGS) -fobjc-arc -o $@ $< -framework Metal -framework Foundation
+t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)

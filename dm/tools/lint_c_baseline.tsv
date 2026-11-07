@@ -91,11 +91,9 @@ dm/gfx/tests/t_transform_feedback.m	bugprone-suspicious-memory-comparison	4
 dm/gfx/tests/t_transform_feedback.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_unwritten_store.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_unwritten_store.m	clang-analyzer-osx.cocoa.RetainCount	1
-dm/gfx/tests/t_upload_budget.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_view_levels.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_view_swizzle.m	clang-analyzer-core.UndefinedBinaryOperatorResult	1
 dm/gfx/tests/t_view_swizzle.m	clang-analyzer-nullability.NullablePassedToNonnull	2
-dm/gfx/tests/t_view_swizzle.m	clang-analyzer-osx.cocoa.RetainCount	2
 dm/gfx/tests/t_xv.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_zskip.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_zskip.m	clang-analyzer-osx.cocoa.RetainCount	1
@@ -109,7 +107,6 @@ dm/host/crash.c	bugprone-command-processor	1
 dm/host/haptics_apple.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/host/hle_fs.c	bugprone-suspicious-realloc-usage	4
 dm/host/hle_fs.c	clang-analyzer-unix.Errno	2
-dm/host/hle_fs.c	clang-analyzer-unix.cstring.NullArg	1
 dm/host/hle_haptics.c	bugprone-suspicious-memory-comparison	1
 dm/host/hle_hid.c	bugprone-signed-char-misuse	1
 dm/host/hle_hid.c	clang-analyzer-unix.Stream	2
@@ -119,9 +116,7 @@ dm/host/hle_os.c	clang-analyzer-unix.Malloc	1
 dm/host/hle_sdk16.c	bugprone-not-null-terminated-result	4
 dm/host/hle_thread.c	bugprone-sizeof-expression	1
 dm/host/loader.c	clang-analyzer-security.ArrayBound	1
-dm/host/tests/t_audio.c	clang-analyzer-core.StackAddressEscape	2
 dm/host/tests/t_audio_device.c	bugprone-assert-side-effect	1
-dm/host/tests/t_audio_spsc.c	clang-analyzer-core.StackAddressEscape	1
 dm/host/tests/t_audio_spsc.c	clang-analyzer-unix.Malloc	4
 dm/host/tests/t_fpslock.c	clang-analyzer-core.NullDereference	1
 dm/host/tests/t_fs.c	bugprone-command-processor	2

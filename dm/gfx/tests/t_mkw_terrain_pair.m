@@ -8,8 +8,9 @@ static id<MTLBuffer> buf(id<MTLDevice> d, size_t n) {
 }
 static id<MTLFunction> compile(id<MTLDevice> d, const char *name) {
     NSError *err=nil; MTLCompileOptions *o=[MTLCompileOptions new];o.languageVersion=MTLLanguageVersion3_0;
-    id<MTLLibrary> l=[d newLibraryWithSource:[NSString stringWithContentsOfFile:@(name)
-       encoding:NSUTF8StringEncoding error:&err] options:o error:&err];
+    NSString *source=[NSString stringWithContentsOfFile:@(name) encoding:NSUTF8StringEncoding error:&err];
+    if (!source) { NSLog(@"%@",err); return nil; }
+    id<MTLLibrary> l=[d newLibraryWithSource:source options:o error:&err];
     if (!l) NSLog(@"%@",err);assert(l);return [l newFunctionWithName:@"main0"];
 }
 int main(int argc,char **argv) { @autoreleasepool {

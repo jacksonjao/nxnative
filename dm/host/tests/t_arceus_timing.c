@@ -31,9 +31,11 @@ int main(int argc, char **argv) {
     dm_arceus_timing_init();
     int target = !strcmp(argv[1], "120") ? 120 : !strcmp(argv[1], "60") ? 60 : !strcmp(argv[1], "30") ? 30 : 0;
     if (target != 30 && target != 60 && target != 120) { assert(!g_arceus_time_base); puts("PASS: Arceus native/invalid target stays untouched"); return 0; }
-    if (getenv("DM_FRAMEGEN") && !strcmp(getenv("DM_FRAMEGEN"), "opticalflow") && target > 60) target = 60;
+    const char *framegen = getenv("DM_FRAMEGEN");
+    if (framegen && !strcmp(framegen, "opticalflow") && target > 60) target = 60;
     assert(g_arceus_time_base == m->base);
-    assert(!strcmp(getenv("DM_PRESENT_INTERVAL"), "display"));
+    const char *interval = getenv("DM_PRESENT_INTERVAL");
+    assert(interval && !strcmp(interval, "display"));
     assert(atoi(getenv("DM_PRESENT_HZ")) == target);
     uint64_t regs[31];
     clock_ns = 1000000000ull; registers(regs); callback(regs, 0);

@@ -68,6 +68,8 @@ def payoff(gap):   # the Gaps order: open gaps, then blocked, kept and unreviewe
 
 # The host's build-keyed rows: (table, the start of the row's label ('' = any), main build ('' = any), entry); the first that fits classifies a row
 HOST_BINDING = [
+    ('', '', 'd3016fc0c0402dfb70fba6b826ea772f', {'what': 'Use the implicit OpenGL ES 3 context for Storm 4 Scaleform', 'now': 'build', 'goal': 'engine', 'purpose': 'rendering',
+     'why': 'Scaleform parses the ES version string before querying the texture limit; keep desktop GL callers on their existing context'}),
     ('k_locks', 'Unity', '', {'what': "Unity's Application.targetFrameRate at a fixed address", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': 'an IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile\'s'}),
     ('k_locks', 'RE Engine', '', {'what': "RE Engine's frame limit at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',

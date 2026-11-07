@@ -166,7 +166,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
                 (vm_region_recurse_info_t)&info, &count);
         if (kr == KERN_SUCCESS)
             fprintf(stderr, "[dm] fault VM region=%#llx..%#llx prot=%#x max=%#x submap=%d\n",
-                    (unsigned long long)a, (unsigned long long)(a + size), info.protection, info.max_protection, info.is_submap);
+                    (unsigned long long)a, (unsigned long long)a + size, info.protection, info.max_protection, info.is_submap);
         else fprintf(stderr, "[dm] fault VM query failed=%d\n", kr);
         if (g_fault_diagnostic) g_fault_diagnostic(si->si_addr);
     }

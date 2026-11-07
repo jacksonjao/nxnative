@@ -341,7 +341,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         for (int metal4 = 0; metal4 < 2; metal4++) {
             id<MTLRenderPipelineState> ps = metal4 ? pso_build(&k, vs, fs, nil, 0, 0, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
             CHECK(ps != nil, "folded pipeline compiles on both paths");
-            if (ps && reference) { __fp16 got[4]; pixels(ps, got); CHECK(!memcmp(want, got, sizeof got), "folded blending equals explicit zero source"); }
+            if (ps && reference) {
+                __fp16 got[4]; pixels(ps, got);
+                CHECK(want[0] == got[0] && want[1] == got[1] && want[2] == got[2] && want[3] == got[3],
+                      "folded blending equals explicit zero source");
+            }
         }
     }
     fs->rf.color_mask = 3;

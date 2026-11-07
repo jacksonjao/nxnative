@@ -49,7 +49,13 @@ int main(int argc, char **argv) {
             // must occupy equal display lengths after the native framebuffer
             // is mapped to the device. This catches a stretched 16:9 camera.
             assert(fabs((w / h) / corrected - 1.0) < 1e-6);
-        } else assert(!memcmp(&corrected, &supplied[n], sizeof corrected));
+        } else {
+            // The untouched input includes NaN: compare the saved register bits.
+            uint32_t actual, expected;
+            memcpy(&actual, &corrected, sizeof actual);
+            memcpy(&expected, &supplied[n], sizeof expected);
+            assert(actual == expected);
+        }
         for (int i = 0; i < 31; i++) if (i != 10) assert(frame[i] == (uint64_t)(0x567800 + i));
     }
     uint64_t regs[31]; for (int i = 0; i < 31; i++) regs[i] = 0x123400 + i;

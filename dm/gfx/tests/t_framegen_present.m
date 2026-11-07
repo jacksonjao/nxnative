@@ -43,12 +43,15 @@ static id<CAMetalDrawable> tick_with(id<CAMetalDrawable> dr) {   // one display-
 }
 static id<CAMetalDrawable> tick(void) { return tick_with(drawable()); }
 int main(void) { @autoreleasepool {
-    alarm(60); setbuf(stdout,NULL); setenv("DM_FRAMEGEN","opticalflow",1); setenv("DM_PRESENT_HZ","60",1);
+    alarm(60); if (setvbuf(stdout,NULL,_IONBF,0)) return 1;
+    setenv("DM_FRAMEGEN","opticalflow",1); setenv("DM_PRESENT_HZ","60",1);
     mtl_init(); g_test_layer=offscreen_layer(); g_layers=[NSMutableArray new];
     g_dm_present_link=2; g_link_started=1; g_link_owns_layer=1; g_delegate=[NvMetalDisplayLinkDelegate new];
     tex_t a=source(93001,40,120),b=source(93002,80,140);
     present_enqueue(&a,1./60,NULL,0); tick();
-    id<MTLSharedEvent> done=[g_dev newSharedEvent]; [g_q4 signalEvent:done value:1]; CHECK("first picture GPU done",[done waitUntilSignaledValue:1 timeoutMS:10000]);
+    id<MTLSharedEvent> done=[g_dev newSharedEvent];
+    if (!done) { fprintf(stderr, "Could not allocate Metal shared event\n"); return 1; }
+    [g_q4 signalEvent:done value:1]; CHECK("first picture GPU done",[done waitUntilSignaledValue:1 timeoutMS:10000]);
     CHECK("first frame has no generated predecessor",g_fg_pending_ticket==0);
     usleep(17000);
     present_enqueue(&b,1./60,NULL,0); tick();

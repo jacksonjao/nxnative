@@ -41,7 +41,9 @@ int main(void) {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); if (!dev) { printf("no Metal device\n"); return 1; }
         NSError *err = nil; id<MTLLibrary> lib = [dev newLibraryWithSource:@(nvn_bca_msl) options:nil error:&err];
         if (!lib) { printf("MSL compile failed: %s\n", err.localizedDescription.UTF8String); return 1; }
-        id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"bca"] error:&err];
+        id<MTLFunction> bca = [lib newFunctionWithName:@"bca"];
+        if (!bca) { fprintf(stderr, "Missing bca Metal function\n"); return 1; }
+        id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:bca error:&err];
         if (!ps) { printf("pipeline failed: %s\n", err.localizedDescription.UTF8String); return 1; }
         id<MTLCommandQueue> q = [dev newCommandQueue];
         int fails = 0, checks = 0;

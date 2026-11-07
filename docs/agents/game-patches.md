@@ -688,6 +688,12 @@ Applied to the `sdk` of any build without CUTS, found by function fingerprint ([
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 12.3.2 (OCTOPATH TRAVELER II), 12.3.9 (Xenoblade Chronicles 3), 13.3.5 (Mario + Rabbids Sparks of Hope), 14.3.0 (Batman: Arkham Knight), 15.3.2 (Paper Mario: The Thousand-Year Door)
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 16.2.0 (Sea of Stars), 18.3.2 (Absolum), 18.3.5 (Super Mario Galaxy)
 
+## Host rows of builds no profile registers
+
+Dead code unless such a build is run; a candidate for removal, or for a build row in its profile.
+
+- `d3016fc0…`: [hle_gl.m:2189](../../dm/gfx/gl/hle_gl.m#L2189): build check (a build no profile registers)
+
 ## Translator rules keyed by a shader's code
 
 - [Program.cs:229](../../dm/gfx/tools/dmsh_xlate/Program.cs#L229): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below) (**`game` → `host`**, gap: a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way)

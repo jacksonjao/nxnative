@@ -23,6 +23,7 @@ static void upload_one(id<MTLTexture> dst, NSHashTable *buffers, uint8_t value) 
     up_begin();
     size_t off;
     id<MTLBuffer> b = up_alloc(32u << 20, &off);
+    if (!b || !dst) { fprintf(stderr, "Could not allocate Metal upload fixture\n"); exit(1); }
     @autoreleasepool { [buffers addObject:b]; }
     // The legacy Metal path uses a compute encoder for deswizzle and a blit
     // encoder for copies. Temporarily switch encoders so the regression can
@@ -56,7 +57,9 @@ int main(void) { @autoreleasepool {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
     d.storageMode = MTLStorageModeShared;
     d.usage = MTLTextureUsageRenderTarget;
-    id<MTLTexture> target = [g_dev newTextureWithDescriptor:d]; res_add(target);
+    id<MTLTexture> target = [g_dev newTextureWithDescriptor:d];
+    if (!target) { fprintf(stderr, "Could not allocate Metal render target\n"); return 1; }
+    res_add(target);
     mtl_sub_begin();
 
     // A temporary decompression view belongs to its upload command buffer,
@@ -64,6 +67,7 @@ int main(void) { @autoreleasepool {
     // by the large BC scene-load burst on tvOS.
     up_begin();
     id<MTLTexture> temporary_view = [target newTextureViewWithPixelFormat:target.pixelFormat];
+    if (!temporary_view) { fprintf(stderr, "Could not allocate Metal upload view\n"); return 1; }
     __weak id<MTLTexture> temporary_view_weak = temporary_view;
     [g_up_texs addObject:temporary_view];
     temporary_view = nil;
@@ -137,9 +141,10 @@ int main(void) { @autoreleasepool {
     up_flush(); up_wait_zero(&g_up_pending);
     size_t idle = live_bytes(buffers);
     CHECK(peak <= (512u << 20), "streaming burst staging stays within 512 MiB");
-    // Demand reuse retains a primary and one bounded overflow block per slot.
-    // Everything beyond those six blocks must retire before the rendering fence.
-    CHECK(idle <= (up_reuse() ? (192u << 20) : (96u << 20)),
+    // Classic Metal retains one primary block per slot. Overflow staging
+    // must retire before the rendering fence.
+    const size_t cached_bytes = sizeof g_up_slot_blk / sizeof *g_up_slot_blk * UP_BLOCK_SIZE;
+    CHECK(idle <= cached_bytes,
           "completed uploads retain only the bounded slot staging cache");
     m4_end(encoder);
     uint64_t fence = mtl_sub_commit();

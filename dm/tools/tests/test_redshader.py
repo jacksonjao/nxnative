@@ -7,7 +7,10 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'gfx/tools'))
 import redshader
-from test_unity_text_glslc import glslc_output, ss
+if __package__:
+    from .test_unity_text_glslc import glslc_output, ss
+else:
+    from test_unity_text_glslc import glslc_output, ss
 
 
 def container(parts, reserve=4):

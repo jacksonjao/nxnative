@@ -54,8 +54,22 @@ static void setup(char *root, size_t root_size, int malformed) {
     setenv("DM_ROMFS_REDIRECTS", sidecar, 1);
 }
 
+static void cleanup_fixture(const char *root) {
+    static const char *files[] = {"rom/arc/data.trpfs", "overlay/arc/data.trpfs", "redirects.tsv"};
+    static const char *dirs[] = {"rom/arc", "overlay/arc", "rom", "overlay"};
+    char path[1300];
+    for (size_t i = 0; i < sizeof files / sizeof *files; i++) {
+        snprintf(path, sizeof path, "%s/%s", root, files[i]);
+        if (unlink(path)) { perror(path); fails++; }
+    }
+    for (size_t i = 0; i < sizeof dirs / sizeof *dirs; i++) {
+        snprintf(path, sizeof path, "%s/%s", root, dirs[i]);
+        if (rmdir(path)) { perror(path); fails++; }
+    }
+    if (rmdir(root)) { perror(root); fails++; }
+}
+
 static int malformed_child(void) {
-    char root[1024]; setup(root, sizeof root, 1);
     if (h_fs_MountRom("data", NULL, 0) != RES_OK) return 3;
     uint64_t h = 0;
     // The malformed configured sidecar must terminate before a handle is
@@ -103,6 +117,7 @@ int main(int argc, char **argv) {
           "overlay directory snapshot reports virtual file size");
     h_fs_CloseDirectory(directory);
     unsetenv("DM_ROMFS_OVERLAY");
+    directory = 0;
     CHECK(h_fs_MountRom("plain", NULL, 0) == RES_OK &&
           h_fs_OpenDirectory(&directory, "plain:/arc", DIRMODE_FILE) == RES_OK &&
           h_fs_ReadDirectory(&nentry, entries, directory, 8) == RES_OK && nentry == 1 &&
@@ -110,13 +125,15 @@ int main(int argc, char **argv) {
           "ordinary directory enumeration reports virtual file size");
     h_fs_CloseDirectory(directory);
 
+    char bad_root[1024]; setup(bad_root, sizeof bad_root, 1);
     pid_t child = fork();
     if (!child) { execl(argv[0], argv[0], "malformed", NULL); _exit(127); }
-    int status = 0; waitpid(child, &status, 0);
-    CHECK(!(WIFEXITED(status) && WEXITSTATUS(status) == 0),
+    int status = 0;
+    CHECK(child > 0 && waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
           "malformed redirect sidecar terminates before opening the archive");
 
-    char command[1200]; snprintf(command, sizeof command, "rm -rf '%s'", root); (void)system(command);
+    cleanup_fixture(root);
+    cleanup_fixture(bad_root);
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;
 }

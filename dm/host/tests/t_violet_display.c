@@ -31,14 +31,15 @@ int main(int argc, char **argv) {
     memcpy(before, frame, sizeof frame); camera_cb(frame, 0);
     float scaled; memcpy(&scaled, (uint8_t *)frame + lane, sizeof scaled);
     assert(fabs(scaled - original * (w / h) / (16.0 / 9)) < 3e-6);
-    for (size_t i = 0; i < sizeof frame; i++) if (i < lane || i >= lane + sizeof scaled)
+    const size_t frame_bytes = sizeof frame;
+    for (size_t i = 0; i < frame_bytes; i++) if (i < lane || i >= lane + sizeof scaled)
         assert(((uint8_t *)frame)[i] == ((uint8_t *)before)[i]);
     memset(frame, 0x5a, sizeof frame); memcpy(before, frame, sizeof frame);
     hud_cb(frame, 0);
     float rect[4]; memcpy(rect, (uint8_t *)(uintptr_t)frame[8] + 4, sizeof rect);
     assert(fabs((rect[2] / 1920) * w / h - 16.0 / 9) < 1e-6);
     assert(fabs(rect[0] - (1920 - rect[2]) * .5) < .001 && rect[1] == 0 && rect[3] == 1080);
-    for (size_t i = 0; i < sizeof frame; i++) if (i < 8 * 8 || i >= 9 * 8)
+    for (size_t i = 0; i < frame_bytes; i++) if (i < 8 * 8 || i >= 9 * 8)
         assert(((uint8_t *)frame)[i] == ((uint8_t *)before)[i]);
     printf("PASS: Violet %s camera/HUD, guards, all other SIMD/GPR/flags bytes\n", ratio);
 }

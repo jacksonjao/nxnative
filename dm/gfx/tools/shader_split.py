@@ -2311,7 +2311,11 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'FZLC' or d[8:9] == b'\x01' and d[17:21] == ZSTD_MAGIC:
         import redshader
-        blobs = [(0, redshader.fzlc(d, zstd_mod()))] if d[:4] == b'FZLC' else redshader.records(d, zstd_mod())
+        zstd = zstd_mod()
+        try:
+            blobs = [(0, redshader.fzlc(d, zstd))] if d[:4] == b'FZLC' else redshader.records(d, zstd)
+        except (ValueError, zstd.ZstdError) as exc:
+            red(f'{label}: invalid REDengine shader cache: {exc}')
         for offset, raw in blobs:
             out.extend(glslc_shaders(raw, f'{label}#REDcache@{offset:#x}'))
         return

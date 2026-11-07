@@ -55,5 +55,8 @@ def verify(archive, files):
             raise ValueError('Archive omits, duplicates or adds shader resources')
         for name, expected in files.items():
             with source.open(name) as stream:
-                if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
+                digest = hashlib.sha256()
+                while block := stream.read(1 << 20):
+                    digest.update(block)
+                if digest.hexdigest() != expected:
                     raise ValueError('Archive resource hash mismatch: ' + name)

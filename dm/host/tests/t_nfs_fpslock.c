@@ -25,7 +25,12 @@ static void check(int mode) {
     if(mode==7)*(uintptr_t *)(base+0xeffc60)=1;
     if(mode==8)*(uint32_t *)(base+0xf0043c)=7;
     dm_fps_lock_tick();
-    if(mode!=4&&mode!=5){assert(atoi(getenv("DM_PRESENT_HZ"))==(mode==10?0:target));assert(!strcmp(getenv("DM_PRESENT_INTERVAL"),"display"));assert(!strcmp(getenv("DM_PRESENT_LINK"),"2"));}
+    if(mode!=4&&mode!=5) {
+        const char *hz=getenv("DM_PRESENT_HZ"), *interval=getenv("DM_PRESENT_INTERVAL"), *link=getenv("DM_PRESENT_LINK");
+        assert(hz && atoi(hz)==(mode==10?0:target));
+        assert(interval && !strcmp(interval,"display"));
+        assert(link && !strcmp(link,"2"));
+    }
     if(mode==10) {
         const uint64_t gaps[]={8333333,16666667,25000000,50000000};
         double summed=0,wall=0;
