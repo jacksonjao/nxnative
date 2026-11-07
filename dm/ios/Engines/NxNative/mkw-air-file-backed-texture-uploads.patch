@@ -1,0 +1,69 @@
+--- a/dm/host/hle_svc.c
++++ b/dm/host/hle_svc.c
+@@ -75,6 +75,13 @@
+ static int g_gf_tab[GF_MAX];       // the files, open for reading and writing
+ static int g_gf_n;                 // how many; 0 while the guest is anonymous. Set by mem_init_once, whose pthread_once orders it before every reader
+ static uint64_t g_gf_min_free;     // DM_GUEST_FILE_MIN_FREE in bytes: the free space on the files' disk under which the game is stopped; 0 = never
++// Report what was actually mapped, including anonymous fallback after a
++// filesystem failure. This flag and reservation are immutable after boot.
++int dm_guest_file_span(uint64_t a, uint64_t n) {
++    uint64_t b = (uint64_t)(uintptr_t)g_as;
++    return g_gf_n && a >= b && n <= g_reserve && a - b <= g_reserve - n;
++}
++
+ 
+ // Every second the free space on the files' disk (they all lie on one volume): under DM_GUEST_FILE_MIN_FREE the game is stopped (exit code 87; the memory watchdog's is 86, hle_nvn.c), before a full
+ // disk leaves the kernel no room to write the guest's pages out, nor a phone's system any room. Every 10th second one line, [RED] under 2 GB free: what the disk cost so far and the footprint's parts
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -820,6 +820,15 @@
+     for (int i = 0; i < g_npool; i++) if (addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return g_plast = i;
+     return -1;
+ }
++extern int dm_guest_file_span(uint64_t addr, uint64_t len);
++static uint64_t mtl_unwired_pool_bytes(uint64_t addr, uint64_t len) {
++    if (len > UINT64_MAX - addr) return 0;
++    pthread_mutex_lock(&g_mu);
++    int i = pool_find(addr, len);
++    uint64_t bytes = i >= 0 && !g_pools[i].buf ? g_pools[i].hi - g_pools[i].base : 0;
++    pthread_mutex_unlock(&g_mu);
++    return bytes;
++}
+ int mtl_addr_known(uint64_t addr, uint64_t len) {
+     if (len > UINT64_MAX - addr) return 0;
+     pthread_mutex_lock(&g_mu);
+@@ -2598,7 +2607,17 @@
+     if (!d) return nil;
+     d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
+     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
+-    int direct = !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
++    // mkw-neo 00d76d51560d: upload packaged CPU texture bytes without
++    // wiring an otherwise unused, file-backed guest pool just to deswizzle.
++    // Keep small or already wired pools on the GPU; keep pressure bursts
++    // from pulling a much larger file range into residency for one texture.
++    uint64_t unwired_bytes = 0;
++    if (t->has_layout && !rb_shift && g_nvn_deswz_gpu && t->L.size &&
++        !(t->pool && nvn_sparse_pool(t->pool)) && !strcasecmp(DM_GAME_ID, "0400C3F00006E000") &&
++        dm_guest_file_span((uint64_t)t->mem, t->L.size))
++        unwired_bytes = mtl_unwired_pool_bytes((uint64_t)t->mem, t->L.size);
++    int keep_cpu = unwired_bytes >= (64ull << 20) && unwired_bytes / 8 >= t->L.size;
++    int direct = !keep_cpu && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
+     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
+                         && (reuse.usage & d.usage) == d.usage
+@@ -2619,8 +2638,13 @@
+     }
+     g_bp_up_bytes += total;
+     void *mb; uint64_t mo;
+-    int use_gpu = !rb_shift && !sparse && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);   // a sparse pool's texture is gathered through its page table on the CPU
+-    if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
++    int use_gpu = !keep_cpu && !rb_shift && !sparse && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);   // a sparse pool's texture is gathered through its page table on the CPU
++    if (keep_cpu) {
++        static unsigned guarded;
++        if (guarded++ < 8) MLOG("MKW packaged texture: staging %llu bytes to avoid wiring a %llu MiB file-backed pool",
++                                (unsigned long long)t->L.size, (unsigned long long)(unwired_bytes >> 20));
++    }
++    if (!keep_cpu && g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
+     if (use_gpu) {
+         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
+         up_begin();
