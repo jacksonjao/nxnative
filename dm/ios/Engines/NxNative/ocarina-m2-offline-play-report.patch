@@ -1,0 +1,14 @@
+--- a/dm/host/hle_sf.c
++++ b/dm/host/hle_sf.c
+@@ -15,7 +15,9 @@
+ #define SF_MAX 64
+ static struct { char name[16]; int used, domain; unsigned seen; } g_sf[SF_MAX];
+ static pthread_mutex_t g_sf_mu = PTHREAD_MUTEX_INITIALIZER;
+-static const char *const sf_served[] = {"olsc:u"};
++// This object is linked only into Ocarina. Its post-intro SDK opens
++// PlayReport directly. Use the existing local response path; send nothing.
++static const char *const sf_served[] = {"olsc:u", "prepo:u"};
+-
++
+ static int sf_slot(uint32_t h) {
+     unsigned i = h - SF_H0;

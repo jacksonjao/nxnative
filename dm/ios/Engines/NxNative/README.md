@@ -42,3 +42,16 @@ Apply `ocarina-m2-opening-movie.patch` to the pinned 60.57 Ocarina Metal 3
 renderer. Source SHA-256 before patching:
 
 - `dm/gfx/nvn/nvn_mtl_legacy.inc`: `4a5bf9dfb5e825d1ac9e1122c7a53fdd841346a0d47f88ae54100accafcc0c4a`
+
+## Ocarina of Time: offline play-report service (M2 60.61)
+
+After the opening video reached end of stream, the game opened `prepo:u`
+directly and aborted with `0xe15` when the service was absent. Admit that name
+to the existing in-process HIPC responder only in the Ocarina framework.
+The responder does not send telemetry or touch saved data. The Metal 3
+renderer, sealed shader chain and all six guest sections stay unchanged.
+
+Apply `ocarina-m2-offline-play-report.patch` to the pinned Ocarina 60.60
+engine's `dm/host/hle_sf.c`, whose SHA-256 is
+`4e37968a18e54f1a00b4bb516665aaa6973cb96cb8d14f83e608b953cd99b6f4`. Relink just the Ocarina framework;
+the shared iOS engine does not use this patch.
