@@ -595,6 +595,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
 
+### Offline gRPC requires local event descriptors
+
+- **Symptom:** startup calls `nn::diag::Abort` while gRPC selects a polling backend, after audio output has already started.
+- **Cause:** gRPC probes `nn::socket::EventFd(0, 0)` and closes it through `nnsocketClose`. The offline socket stub returned `ENETDOWN` for the probe, which disabled every candidate that needs a wakeup descriptor.
+- **Fix:** the host supplies process-local event counters with nonblocking reads, poll readiness and thread wakeups (`hle_net.c`). Creating an event counter does not create a network connection. The usual socket, name resolution and SSL calls still behave as offline.
+- **Found on:** the Ocarina of Time Switch 2 package (0400486024DEC000, boot abort at `main+0x21f0c7c`).
+
 ### Network requests stay on hold before they settle
 
 - **Symptom:** the boot sits at a black loading screen for good, CPU nearly idle, every thread waiting, about 1 boot in 6 (3 in 4 with four Mac hosts at once); the title movie is never opened, and the save files are never probed.
