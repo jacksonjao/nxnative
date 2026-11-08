@@ -3584,7 +3584,7 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, fn_d, fn_u; uint16_t tf_stride[4]; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr, depth_out, has_dual, specialized, slice_variant, zero_image_variant, zero_image_aid, zero_image_reg, zero_image_format; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, fn_d, fn_u; uint16_t tf_stride[4]; BOOL tf_capture_args; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr, depth_out, has_dual, specialized, slice_variant, zero_image_variant, zero_image_aid, zero_image_reg, zero_image_format; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     id<MTLFunction> nonpoint_fn; id<MTLLibrary> nonpoint_lib; NSError *nonpoint_error; int nonpoint_tried;
     id<MTLFunction> min_reduction_fn; id<MTLLibrary> min_reduction_lib; int min_reduction_tried, min_reduction_last, min_reduction_notes;
     int min_reduction_bound, min_reduction_sid, min_reduction_tid, min_reduction_pso_failed;
@@ -7717,7 +7717,17 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
 // skinning pass. Metal has no native feedback stage, so the translated
 // main0_tf vertex entry writes to four ordinary buffers while rasterization is
 // disabled. Later character draws consume those buffers as vertex streams.
-enum { TF_SLOT = 8 };
+enum { TF_SLOT = 8, TF_CAPTURE_SLOT = 14 };
+// Frozen a3a5cfdab59c shaders consume dm_tf_capture. The older chain
+// writes by absolute vertex ID and has no argument in this slot.
+typedef struct __attribute__((aligned(16))) {
+    uint32_t offset[4], args[4];
+    uint64_t order;
+    uint32_t first, count, base_instance, pad;
+    uint64_t reserved;
+} legacy_tf_capture;
+_Static_assert(sizeof(legacy_tf_capture) == 64 && offsetof(legacy_tf_capture, first) == 40,
+               "Metal dm_tf_capture buffer layout");
 static __unsafe_unretained id<MTLRenderPipelineState> tf_pso(NvShader *vs) {
     pso_key key; static const uint32_t no_formats[8];
     pso_key_fill(&key, vs, nil, no_formats, 0, 0, 1, 0); key.topology = MTLPrimitiveTopologyClassPoint; key.fsfn = TF_MARK;
@@ -7726,10 +7736,26 @@ static __unsafe_unretained id<MTLRenderPipelineState> tf_pso(NvShader *vs) {
     if (cached) return cached;
     if (hm_get_id(&g_pso_fail, &key)) return nil;
     NSError *error = nil;
-    id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:pso_desc(&key, vs, nil, nil, 0) error:&error];
+    MTLRenderPipelineDescriptor *desc = pso_desc(&key, vs, nil, nil, 0);
+    const BOOL za = DM_GAME_PROGRAM_ID == 0x0100F43008C44000ull;
+    MTLRenderPipelineReflection *reflection = nil;
+    id<MTLRenderPipelineState> pipeline = za
+        ? [g_dev newRenderPipelineStateWithDescriptor:desc
+              options:MTLPipelineOptionArgumentInfo | MTLPipelineOptionBufferTypeInfo
+              reflection:&reflection error:&error]
+        : [g_dev newRenderPipelineStateWithDescriptor:desc error:&error];
     if (!pipeline) {
         MLOG("[RED] failed to create transform-feedback pipeline (vertex %s): %s", vs->key, error.localizedDescription.UTF8String);
         hm_put_id(&g_pso_fail, &key, NSNull.null); return nil;
+    }
+    if (za) for (MTLArgument *arg in reflection.vertexArguments) {
+        if (arg.type != MTLArgumentTypeBuffer || arg.index != TF_CAPTURE_SLOT) continue;
+        if (arg.bufferDataSize != sizeof(legacy_tf_capture)) {
+            MLOG("[RED] Z-A transform-feedback buffer 14 has unsupported size %lu (%s)", (unsigned long)arg.bufferDataSize, vs->key);
+            hm_put_id(&g_pso_fail, &key, NSNull.null); return nil;
+        }
+        vs->tf_capture_args = YES;
+        static int logged; if (!logged++) MLOG("Z-A transform feedback: detected 64-byte capture ABI, binding vertex slot 14 (%s)", vs->key);
     }
     hm_put_id(&g_pso, &key, pipeline);
     return pipeline;
@@ -7758,6 +7784,7 @@ static void tf_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained id<MTLRenderPipelineState> pipeline = tf_pso(vs);
     if (!pipeline) return;
     rp_end();
+    if (DM_GAME_PROGRAM_ID == 0x0100F43008C44000ull && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.renderTargetWidth = 1; pass.renderTargetHeight = 1; pass.defaultRasterSampleCount = 1;
     if (!g_bare_native) {
@@ -7771,8 +7798,15 @@ static void tf_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     enc_r_pso(encoder, pipeline);
     bind_vbufs(encoder);
     args_dirty_all(); encode_args(encoder, vs, 0, 1);
+    if (vs->tf_capture_args) {
+        // The existing point draw has no base instance (and is limited to
+        // one instance). Start each stream at the checked write address.
+        const legacy_tf_capture capture = {.args = {(uint32_t)dw->count},
+            .first = (uint32_t)dw->first, .count = (uint32_t)dw->count};
+        [encoder setVertexBytes:&capture length:sizeof capture atIndex:TF_CAPTURE_SLOT];
+    }
     for (int b = 0; b < 4; b++) if (vs->tf_stride[b]) {
-        uint64_t base = gpu[b] - (uint64_t)dw->first * vs->tf_stride[b];
+        uint64_t base = vs->tf_capture_args ? gpu[b] : gpu[b] - (uint64_t)dw->first * vs->tf_stride[b];
         NSUInteger offset = 0; id<MTLBuffer> buffer = legacy_buffer_at(base, &offset);
         if (!buffer) { RED_ONCE(103, "transform feedback output address for buffer %d is not registered", b); enc_r_end_pass(encoder); args_dirty_all(); return; }
         legacy_bind_buffer(encoder, 0, TF_SLOT + b, buffer, offset);
