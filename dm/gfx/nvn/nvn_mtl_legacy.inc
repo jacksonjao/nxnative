@@ -7713,7 +7713,7 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     return 0;
 }
 
-// NVN transform feedback is used by Pokémon Legends: Z-A as a vertex-only
+// Pokémon Legends: Z-A and Pokémon Violet use NVN transform feedback as a vertex-only
 // skinning pass. Metal has no native feedback stage, so the translated
 // main0_tf vertex entry writes to four ordinary buffers while rasterization is
 // disabled. Later character draws consume those buffers as vertex streams.
@@ -7728,6 +7728,10 @@ typedef struct __attribute__((aligned(16))) {
 } legacy_tf_capture;
 _Static_assert(sizeof(legacy_tf_capture) == 64 && offsetof(legacy_tf_capture, first) == 40,
                "Metal dm_tf_capture buffer layout");
+static BOOL tf_uses_capture_reflection(void) {
+    const uint64_t program = DM_GAME_PROGRAM_ID;
+    return program == 0x0100F43008C44000ull || program == 0x01008F6008C5E000ull;
+}
 static __unsafe_unretained id<MTLRenderPipelineState> tf_pso(NvShader *vs) {
     pso_key key; static const uint32_t no_formats[8];
     pso_key_fill(&key, vs, nil, no_formats, 0, 0, 1, 0); key.topology = MTLPrimitiveTopologyClassPoint; key.fsfn = TF_MARK;
@@ -7737,9 +7741,9 @@ static __unsafe_unretained id<MTLRenderPipelineState> tf_pso(NvShader *vs) {
     if (hm_get_id(&g_pso_fail, &key)) return nil;
     NSError *error = nil;
     MTLRenderPipelineDescriptor *desc = pso_desc(&key, vs, nil, nil, 0);
-    const BOOL za = DM_GAME_PROGRAM_ID == 0x0100F43008C44000ull;
+    const BOOL check_capture = tf_uses_capture_reflection();
     MTLRenderPipelineReflection *reflection = nil;
-    id<MTLRenderPipelineState> pipeline = za
+    id<MTLRenderPipelineState> pipeline = check_capture
         ? [g_dev newRenderPipelineStateWithDescriptor:desc
               options:MTLPipelineOptionArgumentInfo | MTLPipelineOptionBufferTypeInfo
               reflection:&reflection error:&error]
@@ -7748,14 +7752,14 @@ static __unsafe_unretained id<MTLRenderPipelineState> tf_pso(NvShader *vs) {
         MLOG("[RED] failed to create transform-feedback pipeline (vertex %s): %s", vs->key, error.localizedDescription.UTF8String);
         hm_put_id(&g_pso_fail, &key, NSNull.null); return nil;
     }
-    if (za) for (MTLArgument *arg in reflection.vertexArguments) {
+    if (check_capture) for (MTLArgument *arg in reflection.vertexArguments) {
         if (arg.type != MTLArgumentTypeBuffer || arg.index != TF_CAPTURE_SLOT) continue;
         if (arg.bufferDataSize != sizeof(legacy_tf_capture)) {
-            MLOG("[RED] Z-A transform-feedback buffer 14 has unsupported size %lu (%s)", (unsigned long)arg.bufferDataSize, vs->key);
+            MLOG("[RED] transform-feedback buffer 14 has unsupported size %lu (%s)", (unsigned long)arg.bufferDataSize, vs->key);
             hm_put_id(&g_pso_fail, &key, NSNull.null); return nil;
         }
         vs->tf_capture_args = YES;
-        static int logged; if (!logged++) MLOG("Z-A transform feedback: detected 64-byte capture ABI, binding vertex slot 14 (%s)", vs->key);
+        static int logged; if (!logged++) MLOG("transform feedback: detected 64-byte capture ABI, binding vertex slot 14 (%s)", vs->key);
     }
     hm_put_id(&g_pso, &key, pipeline);
     return pipeline;
@@ -7784,7 +7788,7 @@ static void tf_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained id<MTLRenderPipelineState> pipeline = tf_pso(vs);
     if (!pipeline) return;
     rp_end();
-    if (DM_GAME_PROGRAM_ID == 0x0100F43008C44000ull && g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    if (tf_uses_capture_reflection() && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.renderTargetWidth = 1; pass.renderTargetHeight = 1; pass.defaultRasterSampleCount = 1;
     if (!g_bare_native) {

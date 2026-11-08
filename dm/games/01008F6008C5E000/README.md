@@ -123,3 +123,33 @@ accessory and events never fire. Pokémon GO Plus + is unavailable; this
 does not use the iPhone Bluetooth radio. All 15 hook names were found in
 the existing Violet framework. The signed Air update keeps the original
 game frameworks and assets; entering the title screen is still unverified.
+
+### M2 iPad update 4.0.0
+
+On iPadOS 16.1, the 60.83 game framework keeps the existing signed guest
+code and the installed ROM. It binds to the legacy Metal shader chain
+`b-a3a5cfdab59c`, whose 35,937 base shader libraries were validated before
+delivery. The two shared fonts and the chain's uniform tables are installed
+with the packed library. The same offline BLE fix that unblocks startup on
+Air is linked into the iPad host.
+
+The renderer also reads raster companion sources and the legacy image-atomic
+validation copy from the loose shader directory. The base shader image alone
+does not provide those paths. The pre-repair run loaded the shader image
+and reached the save mount, but rejected affected render pipelines.
+
+
+The 60.83 M2 test opened the title, entered the starting bedroom and
+accepted controller input, but models were stretched across the scene.
+Violet's capture shader uses the same reflected 64-byte vertex argument at
+slot 14 as Z-A. The 60.84 renderer binds that argument when the shader
+declares it. The signed update replaced only the host and was installed in
+place on iPadOS 16.1; the existing ROM and save inventory were verified
+before and after. The isolated test save was mounted on 60.84, but the app
+left the foreground before a new gameplay frame could be checked.
+
+The 60.84 log also showed the verified Violet 2D image-atomic shader still
+being rejected at draw time. The 60.85 candidate allows only its already
+validated read-only border constants through the runtime guard. Texture
+format and alias checks remain in effect. This candidate was built and
+signed; hardware verification is pending.

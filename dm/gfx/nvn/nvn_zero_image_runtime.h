@@ -84,6 +84,7 @@ static int zero_image_prepare(NvProg *program, const p_draw *dw, const p_draw_id
     // draw. Dynamic/storage bindings are excluded by the recorded ABI. Constant
     // buffers still refer to guest memory, so check their ranges as well as
     // sampled texture views and attachments before capturing the image.
+    // The digest-verified Violet 2D companion also reads border constants.
     if (valid && fragment->zero_image_variant == 3) {
         for (int i = 0; i < fragment->rf.nb && valid; i++) {
             const nvn_rbind *b = &fragment->rf.b[i];
@@ -104,6 +105,9 @@ static int zero_image_prepare(NvProg *program, const p_draw *dw, const p_draw_id
             } else {
                 valid = b->kind == NVN_RB_SUPPORT || b->kind == NVN_RB_C1 ||
                     b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2 ||
+                    (b->kind == NVN_RB_BORDER &&
+                     DM_GAME_PROGRAM_ID == 0x01008F6008C5E000ull &&
+                     strcmp(fragment->key, "318346b137ae3a33_b") == 0) ||
                     b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPI;
             }
         }
