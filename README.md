@@ -152,6 +152,8 @@ Upstream games tested on Mac or iPhone; these results do not certify the legacy 
 
 The upstream modern path targets iOS / iPadOS 26 or later and compatible hardware. This fork additionally builds for iOS / iPadOS 16.1 and 17 with a separate legacy backend, BC texture handling and verified shader companions. Layered rendering, sampler limits and image atomics still restrict individual games on older GPUs. A provisional IPA for an unregistered game may not start.
 
+- **Pokémon Violet, legacy iPad:** the shader translator and runtime now accept the read-only border colour block and its matching sampler in the fragment shader that performs an unsigned image atomic max. The original shader compiled for iPadOS 16.1 and its bindings passed the runtime parser on Mac. Device installation and gameplay verification for this change are still pending.
+
 Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the Switch) with that update.
 
 <!-- gallery: written by dm/tools/docs_gallery.py from docs/images/gallery.tsv; change the table, then run it -->

@@ -125,8 +125,9 @@ def reflection(source, native, library_sha256):
     if raster.get('colors') != [] or raster.get('sample_mask', 0):
         raise ValueError('Color or sample-mask output ordering is unsupported')
     out = copy.deepcopy(native)
-    found = []; ids = set(); samplers = 0
-    for b in out.get('bindings', []):
+    found = []; ids = set(); samplers = 0; borders = 0; bits = set()
+    bindings = out.get('bindings', [])
+    for b in bindings:
         aid, kind, ty = b.get('arg_id'), b.get('kind'), b.get('msl_type', '')
         if type(aid) is not int or not 0 <= aid < 192 or aid in ids or 'array<' in ty:
             raise ValueError('Argument IDs must be unique scalar bindings')
@@ -136,6 +137,15 @@ def reflection(source, native, library_sha256):
             raise ValueError('Unresolved or out-of-range companion register')
         if kind == 'drvcb' and b.get('bank') not in (0, 2):
             raise ValueError('Unsupported driver constant bank')
+        if 'border_bit' in b:
+            bit, name = b['border_bit'], b.get('msl_name')
+            if (kind not in ('samp', 'samp_tex', 'samp_id') or
+                    type(bit) is not int or not 0 <= bit < 32 or bit in bits or
+                    not isinstance(name, str) or not name.endswith('_w') or
+                    sum(x.get('msl_name') == name[:-2] and x.get('kind') == kind and
+                        x.get('reg') == b.get('reg') and 'border_bit' not in x for x in bindings) != 1):
+                raise ValueError('Unproven border sampler companion')
+            bits.add(bit)
         if kind == 'img':
             if b.get('msl_name') != proof['image_name'] or aid != proof['image_aid'] or b.get('atomic') is not True or re.sub(r'\s+', '', ty) != 'texture2d<uint,access::read_write>':
                 raise ValueError('Image proof and reflection disagree')
@@ -146,6 +156,10 @@ def reflection(source, native, library_sha256):
         elif kind in ('cbuf', 'c1', 'support', 'drvcb'):
             if not ty.startswith('constant ') or b.get('rw'):
                 raise ValueError('Only read-only constants may accompany the image')
+        elif kind == 'border':
+            borders += 1
+            if b.get('msl_name') != 'dm_border' or ty != 'constant dm_border_t*' or b.get('rw') or b.get('atomic'):
+                raise ValueError('Unproven border constant companion')
         elif kind in ('samp', 'samp_tex', 'samp_id'):
             if ty != 'sampler': raise ValueError('Only scalar samplers are supported')
             samplers += 1
@@ -154,6 +168,8 @@ def reflection(source, native, library_sha256):
                 raise ValueError('Sampled texture must be read-only')
         else:
             raise ValueError('Unproven image companion binding: ' + str(kind))
+    if borders != int(bool(bits)):
+        raise ValueError('Border samplers require exactly one read-only border block')
     if len(found) != 1 or samplers > 16:
         raise ValueError('Expected one image and at most sixteen samplers')
     b = found[0]

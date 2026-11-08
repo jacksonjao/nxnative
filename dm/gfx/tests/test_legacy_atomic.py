@@ -97,4 +97,26 @@ int main(int argc,const char**argv) { @autoreleasepool {
         m=copy.deepcopy(valid);m['bindings'].pop();self.assertFalse(self.native_accepts(m))
         m=copy.deepcopy(valid);m['raster']['colors']=[0];self.assertFalse(self.native_accepts(m))
 
+    def test_violet_border_sampler_with_fragment_atomic_max(self):
+        source = SOURCE.replace('struct Args {', 'struct dm_border_t { uint mask; float4 k[32]; };\nstruct Args {').replace(
+            'sampler smp [[id(4)]];', 'sampler smp [[id(4)]];\nsampler smp_w [[id(6)]];\nconstant dm_border_t* dm_border [[id(7)]];'
+        ).replace('if(a.mask.sample(a.smp,p.xy/size).x<0.5)', '''float alpha=a.mask.sample(a.smp,p.xy/size).x;
+if(a.dm_border->mask & 1u) alpha=mix(alpha,a.mask.sample(a.smp_w,p.xy/size).x,a.dm_border->k[0].x);
+if(alpha<0.5)''')
+        native = copy.deepcopy(META)
+        native['bindings'] += [
+            {'kind':'samp_tex','msl_type':'sampler','msl_name':'smp_w','arg_id':6,'reg':0,'border_bit':0},
+            {'kind':'border','msl_type':'constant dm_border_t*','msl_name':'dm_border','arg_id':7},
+        ]
+        record = ATOMIC.reflection(source,native,DIGEST)
+        self.assertTrue(self.native_accepts(record))
+        for idx,fields in ((4,{'reg':1}),(4,{'border_bit':32}),(5,{'rw':True}),(5,{'msl_type':'constant uint*'})):
+            with self.subTest(fields=fields):
+                changed = copy.deepcopy(native)
+                changed['bindings'][idx].update(fields)
+                with self.assertRaises(ValueError): ATOMIC.reflection(source,changed,DIGEST)
+                changed = copy.deepcopy(record)
+                changed['bindings'][idx].update(fields)
+                self.assertFalse(self.native_accepts(changed))
+
 if __name__=='__main__': unittest.main()

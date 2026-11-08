@@ -27,8 +27,9 @@ static NSString *nvn_atomic_image_record_error(NSDictionary *j, NSString *digest
         return @"Atomic-image ABI must not write raster outputs";
     if (![j[@"entry"] isKindOfClass:NSString.class] || ![j[@"entry"] length]) return @"Missing atomic-image entry";
     NSMutableSet *ids = [NSMutableSet set];
-    NSSet *allowed = [NSSet setWithArray:@[@"img_atomic_2d", @"tex", @"samp", @"samp_tex", @"samp_id", @"cbuf", @"c1", @"support", @"drvcb"]];
-    int images = 0, samplers = 0;
+    NSSet *allowed = [NSSet setWithArray:@[@"img_atomic_2d", @"tex", @"samp", @"samp_tex", @"samp_id", @"cbuf", @"c1", @"support", @"drvcb", @"border"]];
+    NSMutableSet *bits = [NSMutableSet set];
+    int images = 0, samplers = 0, borders = 0;
     for (NSDictionary *b in bindings) {
         if (![b isKindOfClass:NSDictionary.class]) return @"Invalid atomic-image binding";
         NSString *kind = b[@"kind"], *type = b[@"msl_type"];
@@ -43,6 +44,28 @@ static NSString *nvn_atomic_image_record_error(NSDictionary *j, NSString *digest
         if ([kind isEqual:@"drvcb"] && ![b[@"bank"] isEqual:@0] && ![b[@"bank"] isEqual:@2]) return @"Invalid driver bank";
         if (![kind isEqual:@"img_atomic_2d"] && ([b[@"rw"] boolValue] || [b[@"atomic"] boolValue])) return @"Writable companion in shadow ABI";
         if ([kind hasPrefix:@"samp"] && (![type isEqual:@"sampler"] || ++samplers > 16)) return @"Invalid sampler companion";
+        if ([kind isEqual:@"border"]) {
+            if (![type isEqual:@"constant dm_border_t*"] || ![b[@"msl_name"] isEqual:@"dm_border"])
+                return @"Invalid border constant companion";
+            borders++;
+        }
+        id bit = b[@"border_bit"];
+        if (bit) {
+            NSString *name = b[@"msl_name"];
+            if (![kind hasPrefix:@"samp"] || ![bit isKindOfClass:NSNumber.class] ||
+                [bit doubleValue] != [bit intValue] || [bit intValue] < 0 || [bit intValue] >= 32 ||
+                [bits containsObject:bit] || ![name isKindOfClass:NSString.class] || ![name hasSuffix:@"_w"])
+                return @"Invalid border sampler companion";
+            NSString *base = [name substringToIndex:name.length - 2];
+            unsigned matches = 0;
+            for (id x in bindings) {
+                if (![x isKindOfClass:NSDictionary.class]) return @"Invalid atomic-image binding";
+                if ([x[@"msl_name"] isEqual:base] && [x[@"kind"] isEqual:kind] && [x[@"reg"] isEqual:reg] &&
+                    !x[@"border_bit"]) matches++;
+            }
+            if (matches != 1) return @"Border sampler has no unique matching base sampler";
+            [bits addObject:bit];
+        }
         if (([kind isEqual:@"cbuf"] || [kind isEqual:@"c1"] || [kind isEqual:@"support"] || [kind isEqual:@"drvcb"]) && ![type hasPrefix:@"constant "])
             return @"Invalid constant companion";
         if ([kind isEqual:@"tex"] && ((!([type hasPrefix:@"texture"] || [type hasPrefix:@"depth"])) || [type containsString:@"access::write"] || [type containsString:@"access::read_write"]))
@@ -54,5 +77,6 @@ static NSString *nvn_atomic_image_record_error(NSDictionary *j, NSString *digest
             return @"Atomic-image reflection does not match its proof";
         images++;
     }
+    if (borders != (bits.count != 0)) return @"Border samplers require exactly one read-only border block";
     return images == 1 ? nil : @"Expected exactly one shadow image binding";
 }
