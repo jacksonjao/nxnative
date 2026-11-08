@@ -1,4 +1,4 @@
-// Trinity timing on Pokemon Legends: Z-A 2.0.2. All addresses and original
+// Trinity timing on Pokemon Legends: Z-A 2.0.2 and Pokemon Violet 4.0.0. All addresses and original
 // instructions are asserted offline by this build's OBS table in patches.py.
 // Default: callbacks do nothing. DM_ZA_TIMING=1 enables clock diagnostics only.
 // DM_ZA_FPS_MODE=static60 reproduces the original author's single-instruction
@@ -31,6 +31,20 @@ static uint64_t g_za_exception_logs;
 static uint64_t *g_za_table, g_za_table_owned[2];
 static const uint64_t k_za_duration[5] = {16666667, 33333334, 50000000, 66666667, 83333334};
 #define ZA_DURATION_OFFSET 0x3393e20ull
+#define VIOLET_DURATION_OFFSET 0x3c2fba8ull
+typedef struct {
+    const char *build, *name;
+    uint64_t text_end, ro_off, data_off, duration_off, config_ptr_off;
+} trinity_timing_layout;
+static const trinity_timing_layout k_za_layout = {
+    "b1f12fd919eae86ab8a978317677e64b", "Z-A",
+    0x3163f70, 0x3164000, 0x3bc2000, ZA_DURATION_OFFSET, 0x40,
+};
+static const trinity_timing_layout k_violet_layout = {
+    "709bfd66115298640155fcc4979dba15", "Violet",
+    0x343fc90, 0x3440000, 0x4383000, VIOLET_DURATION_OFFSET, 0x30,
+};
+static const trinity_timing_layout *g_trinity;
 static struct {
     uint64_t calls, start_wall, start_guest, sum_ns, invalid, zero;
     uint64_t min_ns, max_ns, interval_calls, codes[6];
@@ -53,7 +67,7 @@ static int za_read(uint64_t at, void *dst, size_t len) {
         len, (vm_address_t)dst, &got) == KERN_SUCCESS && got == len;
 }
 static const char *za_mode_name(int mode) {
-    return mode == ZA_STATIC60 ? "static60" : mode == ZA_ADAPTIVE60 ? "adaptive60" : mode == ZA_DYNAMIC60 ? (g_za_dynamic_hz == 120 ? "dynamic120" : "dynamic60") : "game";
+    return mode == ZA_STATIC60 ? "static60" : mode == ZA_ADAPTIVE60 ? "adaptive60" : mode == ZA_DYNAMIC60 ? (g_trinity == &k_violet_layout ? "dynamic" : g_za_dynamic_hz == 120 ? "dynamic120" : "dynamic60") : "game";
 }
 // The loader intentionally maps NSO ro/data as RW, with text separately RX.
 // Never change a mapping's protection to make this optional experiment work.
@@ -77,22 +91,23 @@ static int za_table_arm(void) {
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
     const size_t bytes = sizeof k_za_duration;
-    if (!m || !m->base || strcmp(m->build_id, "b1f12fd919eae86ab8a978317677e64b")
-        || m->text_end != 0x3163f70 || m->ro_off != 0x3164000 || m->data_off != 0x3bc2000
-        || m->size < ZA_DURATION_OFFSET + bytes || ZA_DURATION_OFFSET < m->ro_off
-        || ZA_DURATION_OFFSET + bytes > m->data_off || dm_detclock_enabled()) {
-        LOG("[RED] Z-A dynamic60: module layout/build or active-clock prerequisite failed; table unchanged"); return 0;
+    const uint64_t offset = g_trinity->duration_off;
+    if (!m || !m->base || strcmp(m->build_id, g_trinity->build)
+        || m->text_end != g_trinity->text_end || m->ro_off != g_trinity->ro_off || m->data_off != g_trinity->data_off
+        || m->size < offset + bytes || offset < m->ro_off
+        || offset + bytes > m->data_off || dm_detclock_enabled()) {
+        LOG("[RED] %s dynamic timing: module layout/build or active-clock prerequisite failed; table unchanged", g_trinity->name); return 0;
     }
-    uint64_t *p = (uint64_t *)(m->base + ZA_DURATION_OFFSET), original[5];
+    uint64_t *p = (uint64_t *)(m->base + offset), original[5];
     if (((uintptr_t)p & 7) || !za_table_rw_nonexec(p, bytes)
         || !za_read((uint64_t)(uintptr_t)p, original, bytes) || memcmp(original, k_za_duration, bytes)) {
-        LOG("[RED] Z-A dynamic60: duration table is not original aligned RW/non-X data; table unchanged"); return 0;
+        LOG("[RED] %s dynamic timing: duration table is not original aligned RW/non-X data; table unchanged", g_trinity->name); return 0;
     }
     g_za_table = p; memcpy(g_za_table_owned, k_za_duration, sizeof g_za_table_owned);
     za_frame_delta_reset(&g_za_frame); memset(&g_za_step, 0, sizeof g_za_step);
     g_za_exception_logs = 0;
-    LOG("Z-A dynamic60: verified main+%#llx duration data; graphics code=0, clock code=0/1; active frame range=(0,50] ms, phase bound=2 ms; long active stalls are explicitly limited",
-        ZA_DURATION_OFFSET);
+    LOG("%s dynamic timing: verified main+%#llx duration data; graphics code=0, clock code=0/1; active frame range=(0,50] ms, phase bound=2 ms; long active stalls are explicitly limited", g_trinity->name,
+        (unsigned long long)offset);
     return 1;
 }
 static void za_table_restore(void) {
@@ -105,7 +120,7 @@ static void za_table_restore(void) {
         if (!__atomic_compare_exchange_n(&g_za_table[i], &expected, k_za_duration[i], 0,
                 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) conflicts++;
     }
-    LOG("Z-A dynamic60: duration ownership released; restore_conflicts=%d", conflicts);
+    LOG("%s dynamic timing: duration ownership released; restore_conflicts=%d", g_trinity->name, conflicts);
     g_za_table = NULL;
 }
 static int za_table_publish(uint64_t step, int code) {
@@ -142,29 +157,35 @@ static int za_reset_locked(int mode, const char *why) {
     g_za_interval_seen = 0; g_za_warmup = 2;
     atomic_store_explicit(&g_za_mode, mode, memory_order_release);
     uint64_t epoch = atomic_fetch_add_explicit(&g_za_epoch, 1, memory_order_acq_rel) + 1;
-    LOG("Z-A timing: epoch=%llu mode=%s boundary=%s; counters reset, awaiting new-mode interval and two clock samples",
+    LOG("%s timing: epoch=%llu mode=%s boundary=%s; counters reset, awaiting new-mode interval and two clock samples", g_trinity->name,
         (unsigned long long)epoch, za_mode_name(mode), why);
     return 1;
 }
 static void za_init(void) {
-    const char *trace = getenv("DM_ZA_TIMING"), *mode = getenv("DM_ZA_FPS_MODE");
+    const char *build = dm_main_build();
+    const int violet = !strcmp(build, k_violet_layout.build);
+    g_trinity = violet ? &k_violet_layout : &k_za_layout;
+    const char *trace = getenv(violet ? "DM_VIOLET_TIMING" : "DM_ZA_TIMING");
+    const char *mode = getenv(violet ? "DM_VIOLET_FPS_MODE" : "DM_ZA_FPS_MODE");
     int live_optin = trace && !strcmp(trace, "1");
     g_za_diag = trace && strcmp(trace, "0");
     int selected_mode = ZA_GAME;
     if (mode && *mode && strcmp(mode, "game")) {
-        if (!strcmp(mode, "static60")) selected_mode = ZA_STATIC60;
+        if (!strcmp(mode, "dynamic")) selected_mode = ZA_DYNAMIC60;
+        else if (violet) LOG("[RED] DM_VIOLET_FPS_MODE=%s: expected game or dynamic; leaving timing unchanged", mode);
+        else if (!strcmp(mode, "static60")) selected_mode = ZA_STATIC60;
         else if (!strcmp(mode, "adaptive60")) selected_mode = ZA_ADAPTIVE60;
         else if (!strcmp(mode, "dynamic60")) selected_mode = ZA_DYNAMIC60;
         else if (!strcmp(mode, "dynamic120")) { selected_mode = ZA_DYNAMIC60; g_za_dynamic_hz = 120; }
-        else LOG("[RED] DM_ZA_FPS_MODE=%s: expected game, static60, adaptive60, dynamic60 or dynamic120; leaving timing unchanged", mode);
+        else LOG("[RED] DM_ZA_FPS_MODE=%s: expected game, dynamic, static60, adaptive60, dynamic60 or dynamic120; leaving timing unchanged", mode);
     }
     if (!g_za_diag && !selected_mode) return;
-    if (strcmp(dm_main_build(), "b1f12fd919eae86ab8a978317677e64b")) {
-        LOG("[RED] Z-A timing: unsupported main build; diagnostics and experiment disabled");
+    if (strcmp(build, g_trinity->build)) {
+        LOG("[RED] Trinity timing: unsupported main build; diagnostics and experiment disabled");
         return;
     }
     if (!gate_obs_present(OBS_ZA_CLOCK_DELTA) || !gate_obs_present(OBS_ZA_INTERVAL)) {
-        LOG("[RED] Z-A timing: rewritten main lacks the required clock/interval observation gates");
+        LOG("[RED] %s timing: rewritten main lacks the required clock/interval observation gates", g_trinity->name);
         return;
     }
     g_za_valid = 1;
@@ -175,17 +196,21 @@ static void za_init(void) {
     // Published only after the startup opt-in, exact build and both gates passed.
     // A DM_CTL change never initializes or arms timing on a previously off run.
     atomic_store_explicit(&g_za_live_allowed, live_optin, memory_order_release);
-    LOG("Z-A timing: mode=%s, base-clock diagnostics enabled; original instructions are retained, no runtime code patch; live_switch=%d", za_mode_name(selected_mode), live_optin);
+    LOG("%s timing: mode=%s, base-clock diagnostics enabled; original instructions are retained, no runtime code patch; live_switch=%d", g_trinity->name, za_mode_name(selected_mode), live_optin);
 }
 
 void dm_za_timing_env_changed(const char *key, const char *value) {
-    if (!key || strcmp(key, "DM_ZA_FPS_MODE")) return;
+    if (!key || (strcmp(key, "DM_ZA_FPS_MODE") && strcmp(key, "DM_VIOLET_FPS_MODE"))) return;
     if (!atomic_load_explicit(&g_za_live_allowed, memory_order_acquire)) {
-        LOG("Z-A timing: live mode change ignored; startup DM_ZA_TIMING=1 and validated gates are required");
+        LOG("Trinity timing: live mode change ignored; startup timing diagnostics and validated gates are required");
         return;
     }
+    const int violet = g_trinity == &k_violet_layout;
+    if (strcmp(key, violet ? "DM_VIOLET_FPS_MODE" : "DM_ZA_FPS_MODE")) return;
     int mode;
     if (value && !strcmp(value, "game")) mode = ZA_GAME;
+    else if (value && !strcmp(value, "dynamic")) mode = ZA_DYNAMIC60;
+    else if (violet) { LOG("[RED] Violet timing: invalid live mode %s; current epoch unchanged", value ?: "(null)"); return; }
     else if (value && !strcmp(value, "static60")) mode = ZA_STATIC60;
     else if (value && !strcmp(value, "adaptive60")) mode = ZA_ADAPTIVE60;
     else if (value && !strcmp(value, "dynamic60")) mode = ZA_DYNAMIC60;
@@ -195,7 +220,7 @@ void dm_za_timing_env_changed(const char *key, const char *value) {
     pthread_mutex_unlock(&g_za_mu);
 }
 
-// main+0x1b292dc: x0 is the returned clock record. The original ldr d0,[x0,#8]
+// Z-A main+0x1b292dc / Violet main+0x2b7a784: x0 is the returned clock record. The original ldr d0,[x0,#8]
 // follows this callback, then delta_ns / 1e9 is passed to the engine as a float.
 static void za_clock_delta(uint64_t *regs, int param) {
     (void)param;
@@ -205,7 +230,7 @@ static void za_clock_delta(uint64_t *regs, int param) {
     int64_t delta = 0;
     if (!za_read(regs[0] + 8, &delta, sizeof delta)) {
         static unsigned failures;
-        if (failures++ < 8) LOG("[RED] Z-A timing: unreadable base-clock record %p", (void *)(uintptr_t)regs[0]);
+        if (failures++ < 8) LOG("[RED] %s timing: unreadable base-clock record %p", g_trinity->name, (void *)(uintptr_t)regs[0]);
         return;
     }
     uint64_t wall = now_ns(), guest = guest_ns();
@@ -213,7 +238,7 @@ static void za_clock_delta(uint64_t *regs, int param) {
     if (epoch != atomic_load_explicit(&g_za_epoch, memory_order_acquire) || !g_za_interval_seen) { pthread_mutex_unlock(&g_za_mu); return; }
     int mode = atomic_load_explicit(&g_za_mode, memory_order_acquire);
     if (g_za_warmup) {
-        if (!--g_za_warmup) LOG("Z-A timing: epoch=%llu mode=%s ready; next clock sample starts a fresh measurement",
+        if (!--g_za_warmup) LOG("%s timing: epoch=%llu mode=%s ready; next clock sample starts a fresh measurement", g_trinity->name,
             (unsigned long long)epoch, za_mode_name(mode));
         pthread_mutex_unlock(&g_za_mu); return;
     }
@@ -230,7 +255,7 @@ static void za_clock_delta(uint64_t *regs, int param) {
         double window = g_za.report_wall ? (wall - g_za.report_wall) / 1e9 : 0;
         double window_active = g_za.report_guest ? (guest - g_za.report_guest) / 1e9 : 0;
         double stepped = (g_za.sum_ns - g_za.report_sum) / 1e9;
-        LOG("Z-A timing: epoch=%llu mode=%s frames=%llu delta=%.6f ms sum=%.6f s wall=%.6f s active=%.6f s ratio_wall=%.6f ratio_active=%.6f window=%.6f s window_ratio_wall=%.6f window_ratio_active=%.6f min/max=%.6f/%.6f ms zero=%llu invalid=%llu interval_calls=%llu configured=%d native_adaptive=%d elapsed=%.6f ms forwarded=%d selected=%d codes[0..4/other]=%llu/%llu/%llu/%llu/%llu/%llu",
+        LOG("%s timing: epoch=%llu mode=%s frames=%llu delta=%.6f ms sum=%.6f s wall=%.6f s active=%.6f s ratio_wall=%.6f ratio_active=%.6f window=%.6f s window_ratio_wall=%.6f window_ratio_active=%.6f min/max=%.6f/%.6f ms zero=%llu invalid=%llu interval_calls=%llu configured=%d native_adaptive=%d elapsed=%.6f ms forwarded=%d selected=%d codes[0..4/other]=%llu/%llu/%llu/%llu/%llu/%llu", g_trinity->name,
             (unsigned long long)epoch, za_mode_name(mode), (unsigned long long)call, delta / 1e6, g_za.sum_ns / 1e9,
             real, active, real > 0 ? (g_za.sum_ns / 1e9) / real : 0,
             active > 0 ? (g_za.sum_ns / 1e9) / active : 0,
@@ -244,7 +269,7 @@ static void za_clock_delta(uint64_t *regs, int param) {
             (unsigned long long)g_za.codes[2], (unsigned long long)g_za.codes[3],
             (unsigned long long)g_za.codes[4], (unsigned long long)g_za.codes[5]);
         g_za.report_wall = wall; g_za.report_guest = guest; g_za.report_sum = g_za.sum_ns;
-        if (mode == ZA_DYNAMIC60) LOG("Z-A dynamic60: epoch=%llu raw_frame=%.6f ms step=%.6f ms flags=%#x samples=%llu active_sum=%.6f s measured_issued=%.6f s phase=%lld ns limited=%.6f s seeds=%llu frozen=%llu resumed=%llu clock_resets=%llu; measured totals exclude explicit seed steps and are independent of diagnostic warmup",
+        if (mode == ZA_DYNAMIC60) LOG("%s dynamic timing: epoch=%llu raw_frame=%.6f ms step=%.6f ms flags=%#x samples=%llu active_sum=%.6f s measured_issued=%.6f s phase=%lld ns limited=%.6f s seeds=%llu frozen=%llu resumed=%llu clock_resets=%llu; measured totals exclude explicit seed steps and are independent of diagnostic warmup", g_trinity->name,
             (unsigned long long)epoch, g_za_step.raw_ns / 1e6, g_za_step.step_ns / 1e6, g_za_step.flags,
             (unsigned long long)g_za_frame.samples, g_za_frame.raw_sum / 1e9, g_za_frame.step_sum / 1e9,
             (long long)g_za_frame.debt, g_za_frame.limited_ns / 1e9, (unsigned long long)g_za_frame.seeds,
@@ -254,7 +279,7 @@ static void za_clock_delta(uint64_t *regs, int param) {
     pthread_mutex_unlock(&g_za_mu);
 }
 
-// main+0x1b296f0 is immediately after bl main+0x113488, at mov w1,w20.
+// Z-A main+0x1b296f0 and Violet main+0x2b7a868 precede the interval setter.
 // w20 already holds the configured code, w22 the measured/fixed candidate.
 // Reproducing mov w20,#0 at the earlier load also requires w22=0 when the
 // native adaptive flag is off; otherwise its original csel had copied w20.
@@ -263,11 +288,11 @@ static void za_interval(uint64_t *regs, int param) {
     pthread_once(&g_za_once, za_init);
     if (!g_za_valid) return;
     uint64_t config = 0; uint8_t native[2]; int64_t elapsed = 0;
-    if (!za_read(regs[19] + 0x40, &config, sizeof config)
+    if (!za_read(regs[19] + g_trinity->config_ptr_off, &config, sizeof config)
         || !za_read(config + 0x20, native, sizeof native)
         || !za_read(regs[21] + 8, &elapsed, sizeof elapsed)) {
         static unsigned failures;
-        if (failures++ < 8) LOG("[RED] Z-A timing: interval inputs unreadable; leaving saved registers unchanged");
+        if (failures++ < 8) LOG("[RED] %s timing: interval inputs unreadable; leaving saved registers unchanged", g_trinity->name);
         return;
     }
     pthread_mutex_lock(&g_za_mu);
@@ -276,7 +301,7 @@ static void za_interval(uint64_t *regs, int param) {
         if (native[1] && elapsed > 1000000000ll) {
             // This guard runs after our observation point. Respect its native
             // code-4 behavior instead of silently supplying the wrong table.
-            LOG("[RED] Z-A dynamic60: native long-work guard reached; returning to game timing");
+            LOG("[RED] %s dynamic timing: native long-work guard reached; returning to game timing", g_trinity->name);
             za_reset_locked(ZA_GAME, "native long-work guard");
         } else {
             g_za_step = za_frame_delta_advance(&g_za_frame, guest_ns(), now_ns());
@@ -284,13 +309,13 @@ static void za_interval(uint64_t *regs, int param) {
                 if (za_table_publish(g_za_step.step_ns, g_za_step.code)) {
                     regs[20] = 0; regs[22] = (uint32_t)g_za_step.code;
                 } else {
-                    LOG("[RED] Z-A dynamic60: duration ownership or bounds changed; returning to game timing");
+                    LOG("[RED] %s dynamic timing: duration ownership or bounds changed; returning to game timing", g_trinity->name);
                     za_reset_locked(ZA_GAME, "duration ownership failure");
                 }
             }
             if ((g_za_step.flags & (ZA_FRAME_LIMITED | ZA_FRAME_CLOCK_RESET)) &&
                     (g_za_exception_logs++ < 8 || !(g_za_frame.samples % 300)))
-                LOG("Z-A dynamic60: exceptional frame raw=%.6f ms step=%.6f ms flags=%#x lost_active=%.6f s",
+                LOG("%s dynamic timing: exceptional frame raw=%.6f ms step=%.6f ms flags=%#x lost_active=%.6f s", g_trinity->name,
                     g_za_step.raw_ns / 1e6, g_za_step.step_ns / 1e6, g_za_step.flags, g_za_frame.limited_ns / 1e9);
         }
     } else if (mode) {

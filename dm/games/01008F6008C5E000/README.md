@@ -153,3 +153,22 @@ being rejected at draw time. The 60.85 candidate allows only its already
 validated read-only border constants through the runtime guard. Texture
 format and alias checks remain in effect. This candidate was built and
 signed; hardware verification is pending.
+
+### M2 iPad: uncapped render timing candidate
+
+Violet 4.0.0 (main build `709bfd66115298640155fcc4979dba15`) has separate
+controls for the presentation interval and the game clock. The timing
+candidate leaves rendering uncapped with `DM_FRAME_LIMIT=unlimited` and
+`DM_PRESENT_INTERVAL=game`; `DM_VIOLET_FPS_MODE=dynamic` makes the engine
+consume measured active frame time instead of a fixed duration each frame.
+`DM_VIOLET_TIMING=1` enables diagnostics and live A/B changes; `game`
+restores the original timing table. Existing ROM, shaders and saves do not
+need to be transferred again. This requires a host with the timing callback
+and a 4.0.0 game framework rewritten with both timing gates.
+
+The original instructions and duration table are checked before arming.
+Local tests exercise variable 30, 60, 86 and 120 fps, verify that the
+consumed game clock tracks active elapsed time, and cover an absent gate,
+a paused channel and restoration of the original table. Actual movement,
+jump height, animations and battle timing on M2 still require device
+verification. A [fixed 60 fps mod was reported to alter jump height](https://github.com/seedds/nxnative/issues/436).

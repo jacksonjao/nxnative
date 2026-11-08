@@ -8,7 +8,7 @@
 static module_t test_modules[1];
 module_t *g_mod = test_modules; int g_nmod;
 static uint64_t g_test_guest = 1000000000, g_test_wall = 1000000000;
-static int g_detclock;
+static int g_detclock, g_missing_gate;
 static void (*g_readonly)(uint64_t *, int);
 static void (*g_mutable)(uint64_t *, int);
 static void (*g_skill_visibility_observer)(uint64_t *, int);
@@ -16,7 +16,7 @@ static void (*g_skill_destroy_observer)(uint64_t *, int);
 uint64_t now_ns(void) { return g_test_wall; }
 uint64_t guest_ns(void) { return g_test_guest; }
 int dm_detclock_enabled(void) { return g_detclock; }
-int gate_obs_present(int id) { return id == OBS_ZA_CLOCK_DELTA || id == OBS_ZA_INTERVAL; }
+int gate_obs_present(int id) { return id == OBS_ZA_CLOCK_DELTA || (id == OBS_ZA_INTERVAL && !g_missing_gate); }
 void gate_obs_set(int id, void (*fn)(uint64_t *, int)) {
     switch (id) {
     case OBS_ZA_CLOCK_DELTA:
@@ -54,26 +54,45 @@ static void consume_then_interval(uint64_t dt, uint64_t wall_extra, int paused) 
     g_record[1] = (int64_t)g_pending; g_consumed += g_pending;
     g_readonly(g_original, 0); interval(paused);
 }
-static void setup(void) {
+static void setup(int violet) {
     g_nmod = 1; module_t *m = &g_mod[0]; strcpy(m->name, "main");
-    strcpy(m->build_id, "b1f12fd919eae86ab8a978317677e64b");
-    m->size = 0x4000000; m->text_end = 0x3163f70; m->ro_off = 0x3164000; m->data_off = 0x3bc2000;
+    if (violet) {
+        strcpy(m->build_id, "709bfd66115298640155fcc4979dba15");
+        m->size = 0x4400000; m->text_end = 0x343fc90; m->ro_off = 0x3440000; m->data_off = 0x4383000;
+    } else {
+        strcpy(m->build_id, "b1f12fd919eae86ab8a978317677e64b");
+        m->size = 0x4000000; m->text_end = 0x3163f70; m->ro_off = 0x3164000; m->data_off = 0x3bc2000;
+    }
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    assert(m->base != MAP_FAILED); g_table = (uint64_t *)(m->base + ZA_DURATION_OFFSET);
+    assert(m->base != MAP_FAILED); g_table = (uint64_t *)(m->base + (violet ? 0x3c2fba8 : 0x3393e20));
     memcpy(g_table, k_za_duration, sizeof k_za_duration);
-    uint64_t config = (uint64_t)(uintptr_t)g_config; memcpy(g_frame + 0x40, &config, 8); g_config[0x20] = 1;
+    uint64_t config = (uint64_t)(uintptr_t)g_config; memcpy(g_frame + (violet ? 0x30 : 0x40), &config, 8); g_config[0x20] = 1;
     for (int i = 0; i < 31; i++) g_original[i] = 0x1000 + i;
     g_original[0] = (uint64_t)(uintptr_t)g_record;
     g_original[19] = (uint64_t)(uintptr_t)g_frame;
     g_original[21] = (uint64_t)(uintptr_t)g_elapsed;
     g_original[20] = g_original[22] = 1;
+    // Z-A's environment should never arm Violet's clock or vice versa.
     setenv("DM_ZA_TIMING", "1", 1); setenv("DM_ZA_FPS_MODE", "dynamic60", 1);
+    if (violet) {
+        setenv("DM_VIOLET_TIMING", "1", 1);
+        setenv("DM_VIOLET_FPS_MODE", "dynamic", 1);
+    }
 }
 int main(int argc, char **argv) {
-    assert(argc == 2); const char *test = argv[1]; setup();
+    assert(argc == 2); const char *test = argv[1];
+    int violet = !strncmp(test, "violet", 6);
+    const char *key = violet ? "DM_VIOLET_FPS_MODE" : "DM_ZA_FPS_MODE";
+    const char *mode = violet ? "dynamic" : !strcmp(test, "za-alias") ? "dynamic" : "dynamic60";
+    setup(violet);
+    setenv(key, mode, 1);
     assert(g_skill_visibility_observer && g_skill_destroy_observer);
     int rejection = 1;
-    if (!strcmp(test, "wrong-layout")) g_mod[0].ro_off++;
+    if (!strcmp(test, "violet-off")) {
+        unsetenv("DM_VIOLET_TIMING"); unsetenv(key);
+        dm_za_timing_env_changed(key, "dynamic");
+    } else if (!strcmp(test, "violet-no-gate")) g_missing_gate = 1;
+    else if (!strcmp(test, "wrong-layout")) g_mod[0].ro_off++;
     else if (!strcmp(test, "wrong-build")) g_mod[0].build_id[0] = '0';
     else if (!strcmp(test, "wrong-table")) g_table[4]++;
     else if (!strcmp(test, "unaligned")) g_mod[0].base++;
@@ -82,7 +101,7 @@ int main(int argc, char **argv) {
         uintptr_t page = (uintptr_t)g_table & ~((uintptr_t)getpagesize() - 1);
         int prot = PROT_READ | (!strcmp(test, "executable") ? PROT_EXEC : 0);
         assert(!mprotect((void *)page, (size_t)getpagesize(), prot));
-    } else { assert(!strcmp(test, "clock") || !strcmp(test, "clock120") || !strcmp(test, "conflict") || !strcmp(test, "guard")); rejection = 0; }
+    } else { assert(!strcmp(test, "clock") || !strcmp(test, "clock120") || !strcmp(test, "conflict") || !strcmp(test, "guard") || !strcmp(test, "violet") || !strcmp(test, "za-alias")); rejection = 0; }
     uint64_t before[5]; memcpy(before, g_table, sizeof before);
     interval(0);
     if (rejection) {
@@ -108,14 +127,19 @@ int main(int argc, char **argv) {
         // whole-frame input, with the original one-frame provider latency.
         const uint64_t normal[] = {24000000,30000000,26500000,28500000};
         const uint64_t high_refresh[] = {8333333,8333334,7500000,9166667};
-        const uint64_t *pattern = !strcmp(test, "clock120") ? high_refresh : normal;
+        // Mix 30, 60, ~86 and 120 Hz to prove it consumes elapsed time,
+        // rather than selecting a constant duration from a target FPS.
+        const uint64_t variable[] = {33333333,16666667,11627907,8333333};
+        const uint64_t *pattern = violet ? variable : !strcmp(test, "clock120") ? high_refresh : normal;
         uint64_t active = 0;
         for (int i = 0; i < 3600; i++) {
             uint64_t dt = pattern[i % 4]; active += dt;
             if (!(i % 23)) {
                 uint64_t samples = g_za_frame.samples, pending = g_pending;
                 int64_t debt = g_za_frame.debt;
-                dm_za_timing_env_changed("DM_ZA_FPS_MODE", "dynamic60");
+                if (violet) dm_za_timing_env_changed("DM_ZA_FPS_MODE", "game");
+                assert(atomic_load(&g_za_mode) == ZA_DYNAMIC60);
+                dm_za_timing_env_changed(key, mode);
                 assert(g_za_frame.samples == samples && g_za_frame.debt == debt && g_pending == pending);
             }
             consume_then_interval(dt, 0, 0);
@@ -149,14 +173,16 @@ int main(int argc, char **argv) {
         consume_then_interval(1000000000, 0, 0);
         assert(g_za_step.flags & ZA_FRAME_LIMITED); assert(g_pending <= 50000000);
         // Returning to every existing mode restores original values first.
-        dm_za_timing_env_changed("DM_ZA_FPS_MODE", "static60");
-        assert(!g_za_table && !memcmp(g_table, k_za_duration, sizeof k_za_duration));
-        interval(0); assert(g_regs[20] == 0 && g_regs[22] == 0);
-        dm_za_timing_env_changed("DM_ZA_FPS_MODE", "dynamic60"); interval(0);
-        assert(g_za_table && g_regs[20] == 0);
-        dm_za_timing_env_changed("DM_ZA_FPS_MODE", "game");
+        if (!violet) {
+            dm_za_timing_env_changed(key, "static60");
+            assert(!g_za_table && !memcmp(g_table, k_za_duration, sizeof k_za_duration));
+            interval(0); assert(g_regs[20] == 0 && g_regs[22] == 0);
+            dm_za_timing_env_changed(key, mode); interval(0);
+            assert(g_za_table && g_regs[20] == 0);
+        }
+        dm_za_timing_env_changed(key, "game");
         assert(!g_za_table && !memcmp(g_table, k_za_duration, sizeof k_za_duration));
         interval(0); assert(g_regs[20] == 1 && g_regs[22] == 1);
     }
-    printf("Z-A dynamic %s: PASS\n", test); return 0;
+    printf("%s dynamic %s: PASS\n", violet ? "Violet" : "Z-A", test); return 0;
 }

@@ -288,7 +288,7 @@ za-display: $(B)/t_za_display
 za-timing: $(B)/t_za_frame_delta $(B)/t_za_timing $(B)/t_za_dynamic
 	$(B)/t_za_frame_delta
 	@set -e; for c in off trace static-fixed static-adaptive native-adaptive wrong-build live concurrent; do $(B)/t_za_timing $$c 2>/dev/null; done
-	@set -e; for c in clock clock120 conflict guard wrong-layout wrong-build wrong-table unaligned detclock readonly executable; do $(B)/t_za_dynamic $$c 2>/dev/null; done
+	@set -e; for c in clock clock120 za-alias violet violet-off violet-no-gate conflict guard wrong-layout wrong-build wrong-table unaligned detclock readonly executable; do $(B)/t_za_dynamic $$c 2>/dev/null; done
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
 $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
