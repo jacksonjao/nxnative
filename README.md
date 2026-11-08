@@ -27,6 +27,19 @@ MetalFX path: local GPU validation covered both 1280×720 and 960×540 input,
 including color and aspect-ratio bars. Deployment and game-by-game validation
 of that renderer on iPad are pending.
 
+On M2, build 60.86 is installed in place. Pokémon Violet 4.0.0 and
+Pokémon Legends: Z-A now select uncapped rendering with a separate
+elapsed-time game clock. The settings and retained game data were read
+back; gameplay speed still needs device verification.
+
+The M2 delivery also trialed a targeted Metal 3 mesh fix for Ocarina of
+Time and Mario Kart World. It turns an invalid generated triangle into a
+degenerate triangle without changing valid indices or the shader
+argument layout. The four Ocarina libraries and the two Kart libraries
+with matching descriptors were read back on-device with rollback copies
+retained. This is an installation result: Ocarina's first 3D scene and
+Kart race stability and frame rate remain open.
+
 | Game | What this fork changed | Verified result and open issues |
 | --- | --- | --- |
 | Mario Kart World | Restored movie texture views, terrain uploads and sparse mappings; fixed black scenery with conditional clears; reduced upload and pipeline work; restored Air's 60 Hz pacing ([movie](https://github.com/widmonstertony/nxnative/commit/3d0a3a0), [clears](https://github.com/widmonstertony/nxnative/commit/381ed5f), [upload cache](https://github.com/widmonstertony/nxnative/commit/e221694), [pacing](https://github.com/widmonstertony/nxnative/commit/e847a4c)) | Air player confirmed the black scenery was gone, but reported low race performance and intermittent race-entry crashes. Air logs still show 1080p input to MetalFX even in handheld mode. On M2, free roam rendered in a prior test; mesh faults and race performance remain open. |

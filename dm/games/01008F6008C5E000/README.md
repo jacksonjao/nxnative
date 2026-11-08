@@ -166,7 +166,8 @@ restores the original timing table. Existing ROM, shaders and saves do not
 need to be transferred again. This requires a host with the timing callback
 and a 4.0.0 game framework rewritten with both timing gates.
 
-The original instructions and duration table are checked before arming.
+The 60.86 device update and the per-game timing settings were verified in
+place. The original instructions and duration table are checked before arming.
 Local tests exercise variable 30, 60, 86 and 120 fps, verify that the
 consumed game clock tracks active elapsed time, and cover an absent gate,
 a paused channel and restoration of the original table. Actual movement,
