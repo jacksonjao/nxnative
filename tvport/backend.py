@@ -261,7 +261,8 @@ class Game:
         if not self.build:
             return None
         folder = self.build / 'shader/ios'
-        return folder if (folder / f'b-{chain()}/inputs.tsv').is_file() else None
+        libraries = (folder / f'b-{chain()}/inputs.tsv', folder / 'vk/vk_shaders.metallib', folder / 'gl/gl_shaders.metallib')
+        return folder if any(path.is_file() for path in libraries) else None
 
     @property
     def prepared(self) -> bool:
@@ -669,7 +670,17 @@ def generate_project(game: Game, args, team: str, bundle: str, python: str) -> P
     if art:
         env['DM_ICON'] = str(art)
     stream(['bash', REPO / 'dm/ios/tools/build_ipa.sh', '--prepare-xcode'], env=env, cwd=REPO)
-    return game.build / 'tvport-xcode'
+    project = game.build / 'tvport-xcode'
+    # The Apple TV settings screen starts in the mode requested for this build,
+    # but the player can change it at every launch and the choice is persisted.
+    settings_path = project / 'Gen/dm/launcher.json'
+    if settings_path.is_file():
+        settings_data = json.loads(settings_path.read_text())
+        for setting in settings_data.get('settings', []):
+            if setting.get('env') == 'DM_OPMODE':
+                setting['default'] = '0' if args.mode == 'handheld' else '1'
+        settings_path.write_text(json.dumps(settings_data, indent=2, ensure_ascii=False) + '\n')
+    return project
 
 
 def merged_rows(*texts: str) -> list:

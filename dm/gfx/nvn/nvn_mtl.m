@@ -15500,6 +15500,26 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (atomic_load(&g_gpu_lost)) return 0;   // the display command buffer would be ignored too: take no drawable from the screen the front end is about to close
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
+    if (g_classic) {
+        // The Vulkan producer on older Apple GPUs uses classic Metal. The
+        // Metal 4 path below cannot run there, so composite its swapchain image
+        // into the tvOS drawable on the presenter's classic command queue.
+        present_pipeline(layer.pixelFormat);
+        uint64_t dt0 = now_ns();
+        id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
+        if (!supplied) g_drawable_ns += now_ns() - dt0;
+        if (!dr) return 0;
+        id<MTLCommandBuffer> cb = [g_q commandBuffer];
+        if (!present_encode(cb, src, dr.texture, crop)) return 0;
+        if (period > 0) [cb presentDrawable:dr afterMinimumDuration:period];
+        else [cb presentDrawable:dr];
+        [cb commit];
+        pthread_mutex_lock(&g_pq_mu);
+        if (ticket > g_pq_done) g_pq_done = ticket;
+        pthread_cond_broadcast(&g_pq_cv);
+        pthread_mutex_unlock(&g_pq_mu);
+        return 1;
+    }
     if (g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
@@ -15575,7 +15595,16 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
-static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
+static void ext_wait(uint64_t v) {
+    if (!v || !g_ext_ev) return;
+    if (g_classic) {
+        // Vulkan renders on its own classic queue. Order the presenter queue after
+        // that frame's shared-event signal before it samples the swapchain image.
+        id<MTLCommandBuffer> cb = [g_q commandBuffer];
+        [cb encodeWaitForEvent:g_ext_ev value:v];
+        [cb commit];
+    } else [g_q4 waitForEvent:g_ext_ev value:v];
+}
 static void snap_commit_wait(uint64_t v);
 static pq_item g_pq[PQ];
 static uint64_t g_pq_in;
@@ -15658,7 +15687,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
 
 static CAMetalDisplayLink *g_link; static CFRunLoopRef g_link_rl; static int g_link_started;
 static int g_link_owns_layer, g_classic_busy;   // Under g_pq_mu: nextDrawable throws while the layer has the display link object attached, so the present thread that takes its own drawable and the display link object are mutually exclusive
-static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mode) && g_link != nil; }
+static int link_on(void) { return !g_classic && g_dm_present_link && !atomic_load(&g_rescue_mode) && g_link != nil; }
 // Screens whose refresh rate is not a multiple of the link's (144 or 165 Hz against 60 or 30): asked for 60 Hz, the system fires the link on every third refresh of a 165 Hz screen,
 // 55 Hz, and a game paced by the link runs at 55 fps (27.5 at 30). There the link runs at the screen's rate and only the refreshes nearest a steady clock of the wanted rate count as
 // ticks (g_link_vperiod, NvMetalDisplayLinkDelegate): 60 a second on average, each frame shown on the refreshes nearest its 1/60 s slot. DM_LINK_VTICK=0 keeps the system's choice.
@@ -15722,7 +15751,7 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
 static void link_sync(void) {   // Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)
     static int applied;
     pthread_mutex_lock(&g_pq_mu);
-    int want = g_dm_present_link;
+    int want = g_classic ? 0 : g_dm_present_link;
     if (want < 0 || want > 2) { g_dm_present_link = applied == 3 ? 1 : applied; pthread_mutex_unlock(&g_pq_mu); return; }
     if (g_rescue_mode && (want != g_rescue_mode || now_ns() >= g_rescue_back_at)) {
         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
@@ -15839,6 +15868,7 @@ static _Atomic uint64_t g_snap_next, g_snap_cmt;   // g_snap_cmt: the last copy 
 static int g_snap_n = 2;
 int mtl_snap_on(void) {
     static int v = -1; if (v >= 0) return v;
+    if (g_classic) { g_snap_n = 2; return v = 0; }
     const char *e = getenv("DM_PRESENT_SNAP");
     int n = e ? atoi(e) : DM_GAME_PRESENT_SNAP ? 2 : 0;   // the profile's present_snap (a ring of 2)
     v = n > 0; g_snap_n = n < 2 ? 2 : n > SNAP_MAX ? SNAP_MAX : n;
@@ -15928,8 +15958,8 @@ static uint64_t snap_take(const tex_t *t) {
 }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
     atomic_store(&dm_present_ns, now_ns());
-    if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
-    xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial;
+    if (atomic_load(&g_present_discard)) return 0;
+    if (t) { xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.
     // Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on the present thread, the upload aborted the host.
     // Resolve it here, where the game queues the present, and commit the batch, so the display command buffer comes after the upload on the queue and the present thread finds it uploaded.

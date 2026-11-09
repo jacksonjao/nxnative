@@ -66,7 +66,7 @@ targets:
       TARGETED_DEVICE_FAMILY: "3"
       ENABLE_BITCODE: NO
       GCC_C_LANGUAGE_STANDARD: gnu11
-      OTHER_CFLAGS: $(inherited) -mcpu=apple-a15   # The host assembly contains LSE atomic instructions, which the default baseline does not accept
+      OTHER_CFLAGS: $(inherited) -mcpu=apple-a12   # A12-compatible CPU floor; Metal capabilities are detected separately at runtime
       CLANG_ENABLE_OBJC_ARC: YES
       DEBUG_INFORMATION_FORMAT: dwarf
       GCC_WARN_INHIBIT_ALL_WARNINGS: YES
