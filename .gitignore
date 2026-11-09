@@ -12,11 +12,6 @@ dm/games/*/cb_extent.tsv
 .coverage.*
 /coverage.json
 
-# TVPort
-tvport/app/build/
-tvport/app/*.xcodeproj/
-tvport/app/Info.plist
-tvport/dist/
 
 # Local Apple TV build products and game material. Never publish a built game app,
 # NSP/XCI dumps, keys, extracted RomFS files, or shader captures made from a game.

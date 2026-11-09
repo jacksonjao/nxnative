@@ -4,7 +4,7 @@
 // LZFSE, for speed: Animal Crossing: New Horizons' island is 24 MB of encrypted files that nothing shrinks, and LZMA spent 3.6 s on it on an Apple M6 (longer on the A15) for no gain, while the app
 // was closed 7 s after the save and the copy never landed; LZFSE takes 66 ms. Super Mario Odyssey's 2 MB File1.bin, 98% zeros, packs to 20 KB (9 KB with LZMA). Saves stored as "DMZ1" are LZMA.
 // NSUserDefaults abort() the app past about 1 MB in all (measured on an A15, tvOS 27.2), so a save that would pass STORE_LIMIT goes to a plain file in Library/Preferences beside them instead.
-// Deleting the app deletes these too: TVPort keeps another copy on the Mac. This replaces SaveSync.m and CloudSaves.m, which need iCloud Drive, and a free Apple ID has no iCloud.
+// Deleting the app deletes these too: copy the saves off the Apple TV with devicectl to keep another. This replaces SaveSync.m and CloudSaves.m, which need iCloud Drive, and a free Apple ID has no iCloud.
 #import <Foundation/Foundation.h>
 #include <compression.h>
 #include <stdio.h>

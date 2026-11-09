@@ -1,64 +1,40 @@
 # Build games for Apple TV
 
-This guide describes the Apple TV route in nxnative-tvOS. Each game needs its own supported profile and its own build from files you dumped from your console. The project does not include commercial game data, title keys, or a universal prebuilt game app.
+The `tvos` branch of this fork is seedds' nxnative with a tvOS target on top. Each game is built from your own dump, update and `prod.keys`, as for the iPhone. The repository has no game data, keys or prebuilt apps.
 
-## What you need
+## What runs where
 
-- An Apple silicon Mac with macOS 26.6 or later and Xcode with the tvOS SDK and Metal toolchain installed. The Mac is used to translate game assets, compile, sign, and install the app; the target is Apple TV only.
-- Homebrew packages `xcodegen`, `zstd`, and `glslang`, plus the .NET 10 SDK. The setup checker lists missing requirements.
-- An Apple ID configured in Xcode. Select a signing team during the build if automatic team detection does not find it.
-- An Apple TV in Developer Mode, paired with Xcode at **Window > Devices and Simulators**.
-- Your own game dump, optional update and DLC, and your own `prod.keys`. NSP, XCI and their compressed NSZ/XCZ forms are supported by the build pipeline.
+| Apple TV | Chip | Memory | NVN games (most Nintendo titles) | Vulkan / OpenGL games |
+|---|---|---|---|---|
+| 4K (1st generation) | A10X | 3 GB | no: needs Metal 4 | classic presenter, untested |
+| 4K (2nd generation) | A12 | 3 GB | no: needs Metal 4 | classic presenter: Super Mario Galaxy boots, not play-tested |
+| 4K (3rd generation) | A15 | 4 GB | yes (tested upstream: Super Mario Odyssey, Tears of the Kingdom, Animal Crossing) | yes |
+| 4K (4th generation) | A19 | 8 GB | expected to, untested | expected to, untested |
 
-## Set up the local tools
+The NVN layer replays on Metal 4 queues (A14 and later). Running NVN games on the A10X and A12 needs a renderer on classic Metal queues, which this branch does not have yet. None of these GPUs has BC texture formats, so the host stores BC textures decompressed (`nvn_mtl.m` `no_bc`; `DM_BC_MAX_DIM=<pixels>` drops the finest mip levels to save memory).
 
-Run from the repository root. `TVPORT_DATA` keeps the Python environment and helper data inside this checkout:
+What the tvOS target changes, and why:
 
-```sh
-TVPORT_DATA="$PWD/.local-data" python3 tvport/backend.py doctor
-TVPORT_DATA="$PWD/.local-data" python3 tvport/backend.py setup
-```
+- Game files, saves and logs live in `Library/Caches` (tvOS apps keep no Documents). tvOS may purge it when storage is low, so `SourcesTV/TVSaves.m` keeps a copy of the saves in the app's preferences and puts them back.
+- Guest memory goes into files when the game's pool is larger than the room to the app's memory limit (about 2.1 GB on tvOS): seedds' `DM_GUEST_FILE`, the same as on iPhone.
+- The app opens on a settings screen (`SourcesTV/TVPlayers.m`): language, docked or handheld, and the game's other launcher settings from `dm/launcher.json`, chosen with the Siri Remote or a controller and kept for the next launch. Then **Start game**. In the game, controllers work as on the iPhone; the remote's Back button stays in the game.
+- `DM_TV_PLAYERS=<names, comma-separated>` asks who is playing first, with a save folder each.
 
-Keep game files and keys in folders you control, outside the repository. Place a game's base file, update and DLC together in its folder. The updater and game must belong to the same title.
+## Requirements
+
+- An Apple silicon Mac with Xcode, the tvOS SDK and the Metal toolchain; Homebrew `xcodegen`, `zstd` and `glslang`; the .NET 10 SDK; the repository's Python virtual environment (as for the iPhone build, [development.md](development.md)).
+- An Apple ID in Xcode (its team ID from **Xcode > Settings > Accounts**).
+- An Apple TV in Developer Mode, paired in **Xcode > Window > Devices and Simulators**. Its identifier: `xcrun devicectl list devices`.
 
 ## Build and install
 
-Find the Apple TV identifier with:
-
 ```sh
-TVPORT_DATA="$PWD/.local-data" python3 tvport/backend.py devices
+python3 scripts/build_tvos_from_nsp.py "$HOME/Games/Super Mario Odyssey" -k "$HOME/Keys/prod.keys" \
+  --team-id TEAM_ID --device APPLE_TV_ID --language es-419 --mode docked
 ```
 
-Then build for that device:
+The first build of a game extracts it, rewrites its code and builds its shaders (30 to 60 minutes); later builds reuse `<game folder>/<title ID>_build`. Without `--device` the app is built and not installed. With it, the app is installed and the game's RomFS image is copied to the app's `Library/Caches/romfs.img` (several GB over the network). Do not share the built app: it holds rewritten game code.
 
-```sh
-TVPORT_DATA="$PWD/.local-data" DM_LANG=es-419 python3 tvport/backend.py build \
-  "$HOME/Games/YourGameFolder" \
-  --keys "$HOME/Keys/prod.keys" \
-  --device "$DEVICE_ID" \
-  --team "$TEAM_ID" \
-  --mode docked \
-  --texture-cap 512
-```
+## Keeping up with seedds
 
-Set `DEVICE_ID` to the paired Apple TV identifier and `TEAM_ID` to the Team ID shown in **Xcode > Settings > Accounts**. `--team` can be omitted when the backend finds the signing team automatically. Choose `--mode handheld` or `--mode docked` as the game's initial default; the startup menu can change it if that profile offers both.
-
-The first build of a title can take 30–60 minutes because the pipeline extracts and translates its executable, assets and shaders. Later builds reuse generated data in the game's `_build` folder. The signed `.app` is also placed beside the game files; it is specific to that game build and signing setup.
-
-## Apple TV startup settings
-
-At launch, use the Siri Remote or a connected controller to choose the game's language, console mode, and any other settings exposed by its generated `launcher.json`. Choices are saved in the app on the Apple TV. The list is game-specific: options that do not apply to the title or tvOS are omitted.
-
-The startup screen reports whether the active GPU supports Metal 4. The graphics backend chooses its Metal 4 path automatically when available. When a game exposes a Metal 4 pipeline setting, it appears only on Apple TV hardware that reports Metal 4 support. The MetalFX upscaler appears only when both the GPU and MetalFX spatial scaler support the required Metal 4 path. For supported Vulkan games, devices without Metal 4 can use the experimental classic-Metal presentation fallback; other game graphics paths may require Metal 4. Touch haptics are omitted because Apple TV has no touch surface.
-
-The app is built with an A12-compatible instruction baseline, allowing one build to run on A12 and newer chips. Graphics capabilities are checked separately at runtime, so a newer Apple TV can use its supported Metal features without raising the minimum CPU baseline. Vulkan presentation on devices without Metal 4 uses the experimental classic-Metal fallback developed during A12 bring-up. Validate the picture and gameplay on each device before calling a title supported.
-
-## Game support and troubleshooting
-
-Games need a supported 64-bit executable and compatible graphics path. Their system calls, codecs, shader formats, memory use and save behavior vary. A successful extraction or Xcode build is not proof that the game will boot or render correctly. Start with the game's notes under [`dm/games`](../dm/games/README.md), and capture the Apple TV log when reporting a failure.
-
-The first visual bring-up on an Apple TV 4K (2nd generation, A12) used Super Mario Galaxy. Its build recipe and current validation caveat are in the [Galaxy example](apple-tv-galaxy-example.md). That result documents the path and does not limit the fork to Galaxy or A12.
-
-## Keep private build data out of Git
-
-The repository ignore rules cover `.local-data/`, `build/`, game `_build` folders, `.app`, `.ipa`, NSP/XCI/NSZ/XCZ files and common key files. Keep any other extracted game assets or credentials out of commits and public releases.
+`main` follows `seedds/nxnative` unchanged. `tvos` is `main` plus the commits that make the tvOS target work; to update it, merge `main` into `tvos` and rebuild.

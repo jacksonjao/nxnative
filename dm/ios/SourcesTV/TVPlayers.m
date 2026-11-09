@@ -1,5 +1,5 @@
 // "Who's playing?", for a game shared by several people. Apple's way to tell Apple TV profiles apart is the User Management capability, which a free Apple ID cannot have, so the app cannot see the active profile.
-// With DM_TV_PLAYERS=<names, comma-separated> (TVPort's Players field) it asks instead, before the game starts, and each player gets a save folder of their own. With fewer than two names it goes straight to the game.
+// With DM_TV_PLAYERS=<names, comma-separated> (an env file or the build's DM_ENV_FILE) it asks instead, before the game starts, and each player gets a save folder of their own. With fewer than two names it goes straight to the game.
 // A name keeps its folder for good, whatever else changes in the list: the first name listed takes the save that was already there, whoever picks first, and the others get save.p-<name>. The shader list is shared by all (pso_user.tsv beside them).
 // A game whose only save is the console's (Animal Crossing: New Horizons, its island) keeps one folder, as on a Switch: each name is a user of its own instead, a resident of the same island (hle_account.c).
 #import <UIKit/UIKit.h>
