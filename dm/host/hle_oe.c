@@ -202,7 +202,11 @@ static int prog_plan_make(char *tsv, int index, prog_plan *out, const void *para
 static void prog_exec(void *p) {
     const prog_plan *P = p; char *argv[] = {(char *)P->exe, (char *)P->arg, NULL};
     if (chdir(P->cwd)) LOG("[RED] oe::ExecuteProgram: cannot enter %s", P->cwd);
+#if TARGET_OS_TV
+    (void)argv; errno = ENOTSUP;   // tvOS has no execve; the app records the program instead (DM_EXEC_OUT)
+#else
     execve(P->exe, argv, P->env);
+#endif
     LOG("[RED] oe::ExecuteProgram: cannot start %s (errno %d)", P->exe, errno);
 }
 static const char *prog_name(int index) {   // the profile's name of a program of this app (game.py header_multi), NULL when it has no such program

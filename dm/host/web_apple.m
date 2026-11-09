@@ -9,6 +9,9 @@
 // only once released. A click or touch on the page focuses what it lands on and presses A there. The page is transparent where it draws nothing, over the game's picture; its
 // 1280x720 is fitted to the game's 16:9 picture. Its sounds follow the host's audio (DM_AUDIO; silent on the Mac by default)
 #include <TargetConditionals.h>
+#if TARGET_OS_TV   // tvOS has no WebKit: hle_web.c's weak defaults answer (no web view, the stand-in pages); touches never go to a page
+int front_web_touch(void) { return 0; }
+#else
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
 typedef UIView DmView;
@@ -409,3 +412,4 @@ void front_web_shot(const char *path) {
 #endif
 }
 void front_web_close(void) { dispatch_async(dispatch_get_main_queue(), ^{ if (g_box) { [g_box close]; g_box = nil; } }); }
+#endif   // !TARGET_OS_TV

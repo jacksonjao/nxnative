@@ -265,8 +265,12 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
     [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
 }
 - (void)setTouchFeedback:(BOOL)on {
+#if TARGET_OS_TV
+    (void)on;   // no touch controls and no haptics on an Apple TV
+#else
     if (!on) { _touchFeedback = nil; return; }
     if (!_touchFeedback) { _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [_touchFeedback prepare]; }
+#endif
 }
 
 // ---- Layout (points; computed inside the safe area) ----

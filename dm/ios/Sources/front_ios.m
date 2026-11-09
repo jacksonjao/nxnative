@@ -415,6 +415,11 @@ void front_web_detach(UIView *box) { (void)box; }
 // app ends (hle_oe.c); the next start runs it. To spare the player a silent quit, the app names the program on screen for 1.5 s, then schedules a local notification 1 s ahead that
 // opens the app again ("Tap to start …"), then ends. Notifications are asked for at the first start of such an app; a player who refuses gets the plain quit
 static int multi_program(void) { const char *e = getenv("DM_EXEC_OUT"); return e && *e; }
+#if TARGET_OS_TV   // tvOS shows no notification banners: the next program starts at the app's next start, which the log says
+static void front_ios_notify_setup(void) {}
+static void front_ios_notify_ask(void) {}
+void front_program_handoff(int index, const char *name) { (void)name; LOG("front end: program %d starts at the next start of the app (no notifications on tvOS)", index); }
+#else
 @interface DmNotifyDelegate : NSObject <UNUserNotificationCenterDelegate>
 @end
 @implementation DmNotifyDelegate
@@ -463,6 +468,7 @@ void front_program_handoff(int index, const char *name) {   // front.h; on the g
     else if (err) LOG("[RED] front end: the notification for program %d could not be scheduled: %s", index, err.localizedDescription.UTF8String);
     else LOG("front end: \"Starting %s\" shown, notification for program %d scheduled", nm.UTF8String, index);
 }
+#endif
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result

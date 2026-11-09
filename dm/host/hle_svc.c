@@ -141,6 +141,9 @@ static void guest_file_sweep(void);
 // The query asks the system's cache-delete service: 4-65 ms on the Mac, where it gave 14.73 GB for 14.71 of f_bavail (little is purgeable there). -1 when it fails
 static char g_gf_dir[1024];
 static double guest_file_free_important(void) {
+#if TARGET_OS_TV
+    return -1;   // tvOS has no "available for important usage" key: the room is f_bavail's alone
+#else
     CFURLRef u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)g_gf_dir, (CFIndex)strlen(g_gf_dir), true);   // a new URL each time: one caches the values it gave
     double r = -1; int64_t x; CFTypeRef v = NULL;
     if (!u) return r;
@@ -149,6 +152,7 @@ static double guest_file_free_important(void) {
         CFRelease(v);
     }
     CFRelease(u); return r;
+#endif
 }
 // Every second the room left on the files' disk (they all lie on one volume): its free space less what the files' dirty pages may take when the kernel writes them out. Under
 // DM_GUEST_FILE_MIN_FREE (default 2G) the game is stopped (exit code 87; the memory watchdog's is 86, hle_nvn.c), before a full disk leaves the kernel no room to write the guest's pages out.
