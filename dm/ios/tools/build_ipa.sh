@@ -106,7 +106,12 @@ t "app: $DM_DISPLAY_NAME $DM_APP_VERSION ($DM_BUNDLE_ID), language $DM_LANG$([ $
 t "generate Gen/ (host sources, embedded modules, tables)"
 rm -rf Gen && mkdir -p Gen/dm || die "mkdir Gen"
 python3 tools/gen_build.py "$DM/host" Gen > Gen/dm.xcconfig || die "gen_build"
-if [ "${DM_TVOS:-0}" = 1 ]; then sed -i '' 's/ -framework IOKit//' Gen/dm.xcconfig || die "tvOS frameworks"; fi   # the tvOS SDK has no IOKit
+if [ "${DM_TVOS:-0}" = 1 ]; then   # gen_build.py checks the frameworks against the iOS SDK; leave out those the tvOS SDK lacks too (IOKit, WebKit: web_apple.m has no tvOS body)
+  TVSDK=$(xcrun --sdk appletvos --show-sdk-path) || die "no tvOS SDK"
+  for f in $(sed -n 's/^DM_FRAMEWORKS = //p' Gen/dm.xcconfig | sed 's/-framework //g'); do
+    [ -d "$TVSDK/System/Library/Frameworks/$f.framework" ] || { sed -i '' "s/ -framework $f\$//; s/ -framework $f / /; s/= -framework $f /= /" Gen/dm.xcconfig || die "tvOS frameworks"; echo "tvOS: $f is not in the tvOS SDK, left out of the link" >&2; }
+  done
+fi
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's modules under its tag (the host is built over a table of the programs' profiles: the first program's profile lists them, game.py header_multi)
   F=; : > Gen/embed.S
   while IFS= read -r row; do prog_set "$row"
