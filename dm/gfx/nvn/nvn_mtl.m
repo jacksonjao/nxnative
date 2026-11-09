@@ -2251,7 +2251,10 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
 }
 // Both GPU feedback and an early waiter complete records in submission order.
 // Delayed callbacks carry their fence, never the identity of a recyclable slot.
-static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
+// Its own autorelease pool: the early waiter is the game's thread in its SyncWait (post_early), whose implicit pool never drains, and the records' work autoreleases what it touches.
+// Without it, every render-pass readback buffer a game thread landed (mirror_rb_land) stayed alive for good: Tears of the Kingdom on the Apple TV kept 2,480 of them, 1,005 MB, within
+// 100 s, out of the residency set and still allocated, until tvOS ended it at its memory limit (found by TVPort)
+static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) { @autoreleasepool {
     uint64_t now = guest_ns();
     for (uint64_t f = g_done + 1; f <= fence; f++) {
         post_rec *r = &g_postr[f % POST_RING];
@@ -2265,7 +2268,7 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
     nvn_queue_gpu_progress();
-}
+} }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
