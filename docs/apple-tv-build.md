@@ -27,7 +27,7 @@ What the tvOS target changes, and why:
 
 - An Apple silicon Mac with Xcode, the tvOS SDK and the Metal toolchain; Homebrew `xcodegen`, `zstd` and `glslang`; the .NET 10 SDK; the repository's Python virtual environment (as for the iPhone build, [development.md](development.md)).
 - An Apple ID in Xcode (its team ID from **Xcode > Settings > Accounts**).
-- An Apple TV in Developer Mode, paired in **Xcode > Window > Devices and Simulators**, with **tvOS 27.1 or later**: the fork supports nothing older (`project_tv.yml`'s deployment target). Its identifier: `xcrun devicectl list devices`.
+- An Apple TV in Developer Mode, paired in **Xcode > Window > Devices and Simulators**, with **tvOS 27.2 or later**, the version the fork is built and tested on: it supports nothing older (`project_tv.yml`'s deployment target). Its identifier: `xcrun devicectl list devices`.
 
 ### Setting up without global installs
 
