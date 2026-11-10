@@ -1664,6 +1664,36 @@ static int bc_astc(const tex_t *t, uint32_t *pf) {
     *pf = apf;
     return 1;
 }
+static int bcd_fmt(uint32_t f);
+// DM_BC_MAX_DIM=<pixels>: a BC format decompressed on the CPU (BC6H, BC7: no GPU decoder, no ASTC transcode) costs 4 to 8 times its Switch size, and on an Apple TV (A12,
+// 3 GB, tvOS ends the app near 2.0 GB) Cuphead's 21 BC7 backgrounds took 1076 MB and the app was killed entering a level. A 2D or 2D array texture whose longest side is over the
+// cap is made smaller: with a mip chain its finest levels are left out (the Metal texture starts at NVN level sk; uploads and views shift by it); a single-level RGBA8 one is
+// halved on the CPU with a box filter (*box). Normalized sampling reads the same picture, softer. 0 or unset keeps every texture whole. Copies from such a texture are not shifted
+static unsigned bc_skip(const tex_t *t, int *box) {
+    static int cap = -1; if (cap < 0) { const char *e = getenv("DM_BC_MAX_DIM"); cap = e ? atoi(e) : 0; if (cap > 0) MLOG("BC textures decompressed on the CPU: made smaller down to %d pixels (DM_BC_MAX_DIM)", cap); }
+    if (box) *box = 0;
+    uint32_t pf; int bpp;
+    if (cap <= 0 || (t->d.target != 1 && t->d.target != 4) || bcd_fmt(t->d.format) || bc_astc(t, &pf) || !bc_unpack(t->d.format, &pf, &bpp)) return 0;
+    unsigned n = t->d.levels ? t->d.levels : 1, s = 0;
+    while (s < 4 && MAX(t->d.width >> s, t->d.height >> s) > (unsigned)cap && (n == 1 ? bpp == 4 : s + 1 < n)) s++;
+    if (box) *box = n == 1;
+    if (s) { static int nl; if (nl++ < 24) MLOG("BC texture ser=%llu %ux%u levels %u format %#x: %s %u, now %ux%u", (unsigned long long)t->serial, t->d.width, t->d.height, n, t->d.format,
+                                                  n == 1 ? "halved on the CPU" : "finest levels left out:", s, MAX(t->d.width >> s, 1u), MAX(t->d.height >> s, 1u)); }
+    return s;
+}
+// Box filter of an RGBA8 image (DM_BC_MAX_DIM's single-level case): each destination texel averages the source texels it covers
+static void bc_box_down(const uint8_t *src, uint32_t sw, uint32_t sh, uint8_t *dst, uint32_t w, uint32_t h, size_t dpitch) {
+    uint32_t fx = MAX(sw / w, 1u), fy = MAX(sh / h, 1u);
+    for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) {
+        uint32_t acc[4] = {0}, n = 0;
+        for (uint32_t j = 0; j < fy && y * fy + j < sh; j++) for (uint32_t i = 0; i < fx && x * fx + i < sw; i++) {
+            const uint8_t *p = src + ((size_t)(y * fy + j) * sw + x * fx + i) * 4;
+            acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += p[3]; n++;
+        }
+        uint8_t *q = dst + y * dpitch + (size_t)x * 4;
+        for (int c = 0; c < 4; c++) q[c] = (uint8_t)(n ? (acc[c] + n / 2) / n : 0);
+    }
+}
 static int is_astc4(MTLPixelFormat f) { return f == (MTLPixelFormat)DM_MTL_ASTC4 || f == (MTLPixelFormat)DM_MTL_ASTC4_SRGB; }
 static int is_native_bc(MTLPixelFormat f) { return f >= (MTLPixelFormat)DM_MTL_BC1 && f <= (MTLPixelFormat)DM_MTL_BC7_SRGB; }
 static void tex_tag_format(id<MTLTexture> mt, uint32_t nvn_fmt);
@@ -1674,10 +1704,11 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     int unp = 0, astc = 0; { uint32_t upf; int ubpp; if (bc_astc(t, &upf)) { pf = upf; astc = 1; } else if (bc_unpack(t->d.format, &upf, &ubpp)) { pf = upf; unp = 1; } }
     // Metal's limits: 16384 in 2D, 2048 in 3D, 2048 array layers; beyond them Metal aborts the process on an assertion, so they are caught here with a red line
     if (t->d.width > 16384 || t->d.height > 16384 || t->d.depth > 2048 || t->d.levels > 15) { RED_ONCE(71, "贴图尺寸超出 Metal 上限：%u×%u×%u 级 %u 格式 %#x 目标 %d（首例 ser=%llu）", t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->serial); return nil; }
+    int box = 0; unsigned sk = unp ? bc_skip(t, &box) : 0;   // DM_BC_MAX_DIM
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.pixelFormat = (MTLPixelFormat)pf;
-    d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
-    d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
+    d.width = t->d.width ? MAX(t->d.width >> sk, 1u) : 1; d.height = t->d.height ? MAX(t->d.height >> sk, 1u) : 1; d.depth = 1; d.arrayLength = 1;
+    d.mipmapLevelCount = (t->d.levels ? t->d.levels : 1) - (box ? 0 : sk);
     switch (t->d.target) {
         // 1D / 1D array are created as one-row 2D / 2D array textures: translated shaders never declare texture1d (0 in all five games' libraries) and always sample them as 2D; a Metal 1D texture bound to a texture2d argument is a type mismatch with undefined reads.
         // Super Mario 3D World + Bowser's Fury's material shaders sample 64x1 R32F 1D lookup tables heavily every frame (on Maxwell a 2D sample of a 1D texture reads that one row)
@@ -2144,10 +2175,11 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
     uint32_t upf; int ubpp = 0, unp = 0, astc = bc_astc(t, &upf);
     if (!astc) unp = bc_unpack(t->d.format, &upf, &ubpp);
+    int box = 0; unsigned sk = unp ? bc_skip(t, &box) : 0;   // DM_BC_MAX_DIM: Metal level l is NVN level l + sk (box: level 0 halved sk times); only the CPU-decoded path has it
     int akind = 0; if (astc) { uint32_t apf; nvn_bc_astc_fmt((uint32_t)t->d.format, &apf, &akind); }
     size_t total = 0;
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
-        uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
+        uint32_t w = MAX(t->d.width >> (l + sk), 1u), h = MAX(t->d.height >> (l + sk), 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         total += astc ? (size_t)((w + 3) / 4) * ((h + 3) / 4) * 16 * layers
                       : unp ? (size_t)w * ubpp * h * z * layers
                             : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
@@ -2235,8 +2267,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     int decoded_ok = 1;
     size_t off = 0;
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
-        uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
-        size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
+        uint32_t w = MAX(t->d.width >> (l + sk), 1u), h = MAX(t->d.height >> (l + sk), 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
+        unsigned sl = box ? l : l + sk;   // the NVN level read for Metal level l (DM_BC_MAX_DIM)
+        uint32_t sw = MAX(t->d.width >> sl, 1u), sh = MAX(t->d.height >> sl, 1u);
+        size_t pitch = (size_t)((sw + bw - 1) / bw) * bpb, rows = (sh + bh - 1) / bh;
         for (unsigned y = 0; y < layers; y++) {
             if (astc) {
                 uint8_t *cb = malloc(pitch * rows); size_t ap = (size_t)((w + 3) / 4) * 16;
@@ -2251,7 +2285,13 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                 size_t up = (size_t)w * ubpp;
                 if (!cached.hit) {
                     uint8_t *cb = malloc(pitch * rows * z);
-                    if (!cb || nvn_deswizzle(&t->d, l, y, decode_source, cb, pitch)) { decoded_ok = 0; free(cb); RED_ONCE(9, "texture deswizzle failed for format %#x target %d", t->d.format, t->d.target); break; }
+                    if (!cb || nvn_deswizzle(&t->d, sl, y, decode_source, cb, pitch)) { decoded_ok = 0; free(cb); RED_ONCE(9, "texture deswizzle failed for format %#x target %d", t->d.format, t->d.target); break; }
+                    if (box && sk) {   // DM_BC_MAX_DIM, single level: decode whole, then halve with a box filter into the staging area
+                        size_t sup = (size_t)sw * ubpp; uint8_t *full = malloc(sup * sh);
+                        if (!full || nvn_bc_decode(t->d.format, cb, pitch, sw, sh, full, sup)) decoded_ok = 0;
+                        else bc_box_down(full, sw, sh, decode_target + off, w, h, up);
+                        free(full);
+                    } else
                     for (uint32_t zi = 0; zi < z; zi++)
                         if (nvn_bc_decode(t->d.format, cb + zi * pitch * rows, pitch, w, h, decode_target + off + zi * up * h, up)) decoded_ok = 0;
                     free(cb);
@@ -4123,6 +4163,8 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             sg = g_ser_gen;
         }
         NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : base.mipmapLevelCount - l0;
+        { int vbox = 0; unsigned vsk = bc_skip(&rp->t, &vbox);   // DM_BC_MAX_DIM: the view names NVN levels, Metal level 0 is NVN level vsk (a halved single level keeps its one level)
+          if (vsk && !vbox) { NSUInteger e = r.v.set_levels && r.v.nlevels ? l0 + r.v.nlevels : base.mipmapLevelCount + vsk; l0 = l0 > vsk ? l0 - vsk : 0; nl = e > vsk + l0 ? e - vsk - l0 : 1; } }
         NSUInteger s0 = r.v.set_layers ? r.v.min_layer : 0;
         NSUInteger ns = base.textureType == MTLTextureType3D ? 1 : (r.v.set_layers && r.v.nlayers ? r.v.nlayers : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1) - s0);
         MTLTextureType tt = r.v.set_target ? ttype(r.v.target, base.textureType) : base.textureType;

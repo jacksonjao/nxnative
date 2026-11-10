@@ -25,6 +25,11 @@ def main():
     p.add_argument('--bundle-id', default='org.nxnative.0100f43008c44000.tv')
     p.add_argument('--shader-archive-sha256', required=True)
     p.add_argument('--build-number', default='1')
+    p.add_argument('--display-name', default='Pokémon Legends Z-A', help='the name under the icon')
+    p.add_argument('--language', default='zh-CN', help='the game language (DMLanguage; main_tv.m sets DM_LANG from it)')
+    p.add_argument('--version', default='2.0.2', help='the app version shown by tvOS (the game\'s display version)')
+    p.add_argument('--cpu', default='apple-a12', help='the CPU floor the host is compiled for: apple-a12 runs on every tvOS 27 Apple TV (A12 and later)')
+    p.add_argument('--deployment-target', default='27.2', help='the oldest tvOS the app installs on')
     a = p.parse_args()
     if not re.fullmatch('[0-9a-f]{64}', a.shader_archive_sha256):
         p.error('--shader-archive-sha256 must be a lowercase SHA-256 digest')
@@ -71,7 +76,7 @@ def main():
     bins = {Path(s).name.removesuffix('.patched.bin'): Path(s)
             for s in re.findall(r'\.incbin "([^"]+)"', original)}
     asm, flags, address = [], [], 0x104000000
-    for mod in ('main', 'sdk'):
+    for mod in bins:   # every module embed.S carries (main, subsdk*, sdk), in its order: Cuphead and Odyssey have a subsdk0 beside main and sdk
         hdr = dict(line[2:].split() for line in
                    (gen / 'dm' / f'{mod}.fixups.tsv').read_text().splitlines()
                    if line.startswith('# '))
@@ -97,9 +102,16 @@ def main():
         address += 0x4000
     (gen / 'embed.S').write_text('\n'.join(asm) + '\n')
     config = []
+    tvsdk = Path(subprocess.run(['xcrun', '--sdk', 'appletvos', '--show-sdk-path'], capture_output=True, text=True, check=True).stdout.strip())
     for line in (iosgen / 'dm.xcconfig').read_text().splitlines():
         if line.startswith(('CODE_SIGN_ENTITLEMENTS', 'DM_XCODE_OUTPUT_ROOT', 'OTHER_LDFLAGS', 'DM_APPICON')):
             continue
+        if line.startswith('DM_FRAMEWORKS'):   # the iOS list: leave out what the tvOS SDK lacks (IOKit, WebKit)
+            name, _, value = line.partition('=')
+            fws = re.findall(r'-framework (\S+)', value)
+            missing = [f for f in fws if not (tvsdk / f'System/Library/Frameworks/{f}.framework').is_dir()]
+            if missing: print('not in the tvOS SDK, left out of the link: ' + ' '.join(missing))
+            line = name + '= ' + ' '.join(f'-framework {f}' for f in fws if f not in missing)
         config.append(line)
     cloudkit = [] if any(re.match(r'DM_FRAMEWORKS\s*=.*-framework CloudKit\b', line) for line in config) else ['-framework CloudKit']
     config.append('OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS) -lz ' + ' '.join(cloudkit + flags))
@@ -111,6 +123,9 @@ def main():
     create_icon(icon, gen / 'TVAssets.xcassets')
     sources = out / 'Sources'
     replace_symlink(sources, tv / 'Sources', directory=True)
+    # The settings screen (Sources/TVLauncher.swift) runs on the iPhone's and Mac's settings model, and shows the game's icon: a layered tvOS icon cannot be read back
+    replace_symlink(gen / 'LauncherSettings.swift', tv.parent / 'ios' / 'Sources' / 'LauncherSettings.swift')
+    shutil.copyfile(icon, gen / 'dm' / 'icon.jpg')   # UIImage reads it by its content (a PNG)
     (out / 'project.yml').write_text(f'''name: DmTV
 configFiles:
   Release: Gen/dm-tv.xcconfig
@@ -119,12 +134,13 @@ targets:
   DmTV:
     type: application
     platform: tvOS
-    deploymentTarget: '17.0'
+    deploymentTarget: '{a.deployment_target}'
     sources:
       - path: Sources
       - path: Gen/src
       - path: Gen/main/main.c
         compilerFlags: -Dmain=dm_main
+      - path: Gen/LauncherSettings.swift
       - path: Gen/TVAssets.xcassets
       - path: Gen/embed.S
       - path: Gen/dm
@@ -133,10 +149,10 @@ targets:
     info:
       path: Gen/TV-Info.plist
       properties:
-        CFBundleDisplayName: Pokémon Legends Z-A
+        CFBundleDisplayName: "{a.display_name}"
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        DMLanguage: zh-CN
+        DMLanguage: {a.language}
         DMShaderArchiveSHA256: '{a.shader_archive_sha256}'
         GCSupportsControllerUserInteraction: true
         GCSupportedGameControllers:
@@ -151,15 +167,17 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: {a.bundle_id}
       PRODUCT_NAME: DmTV
-      MARKETING_VERSION: '2.0.2'
+      MARKETING_VERSION: '{a.version}'
       CURRENT_PROJECT_VERSION: '{a.build_number}'
       ASSETCATALOG_COMPILER_APPICON_NAME: App Icon & Top Shelf Image
       DEVELOPMENT_TEAM: {a.team}
       CODE_SIGN_STYLE: Automatic
       ENABLE_USER_SCRIPT_SANDBOXING: NO
       CLANG_ENABLE_OBJC_ARC: YES
+      SWIFT_VERSION: '5.0'
+      SWIFT_OBJC_BRIDGING_HEADER: Sources/TVBridging.h
       GCC_C_LANGUAGE_STANDARD: gnu11
-      OTHER_CFLAGS: $(inherited) -mcpu=apple-a15
+      OTHER_CFLAGS: $(inherited) -mcpu={a.cpu}
       GCC_WARN_INHIBIT_ALL_WARNINGS: YES
       ENABLE_BITCODE: NO
       DEBUG_INFORMATION_FORMAT: dwarf

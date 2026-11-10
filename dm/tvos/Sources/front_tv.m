@@ -1,4 +1,6 @@
-// Apple TV front end: Metal, physical gamepads and UIKit Remote input.
+// Apple TV front end: Metal and physical gamepads. The root is a GCEventViewController with controller events kept from UIKit while the game runs (as the tvos branch):
+// a gamepad drives only the game, its buttons reach no UIKit press (tvOS reports an Xbox controller's X as Play/Pause, which opened the earlier Siri Remote panel), and Back stays in
+// the game. There is no Siri Remote play scheme. Before the game starts, the settings screen (TVLauncher.swift) shows over the root; Play starts the game (dm_tv_start).
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -8,24 +10,18 @@
 #include "front.h"
 #include "dm_input.h"
 #include "hle.h"
-#include "tv_remote.h"
 #include <math.h>
 
 void front_tv_start(void);
 int front_tv_ready(void);
 int front_tv_preparing(void);
+bool dm_show_launcher(void *view_controller, void (*done)(void));   // TVLauncher.swift: false = no launcher.json, or DM_LAUNCHER=0
 static CAMetalLayer *tv_layer;
 static UIViewController *tv_root;
 static BOOL tv_active = YES;
-static TVRemoteState remote_state;
-static TVRemoteOutput physical_state;
-static void input_publish(void) {
-    TVRemoteOutput r = tv_remote_output(&remote_state), p = physical_state;
-    if (!tv_active) { dm_pad_set(0, 0, 0, 0, 0); return; }
-    dm_pad_set(p.buttons | r.buttons, r.lx ?: p.lx, r.ly ?: p.ly, r.rx ?: p.rx, r.ry ?: p.ry);
-}
+static BOOL tv_settings_open;   // the settings screen shows: the game waits for Play
 static void controller_read(GCExtendedGamepad *p) {
-    if (!tv_active) { dm_pad_set(0, 0, 0, 0, 0); return; }
+    if (!tv_active || tv_settings_open) { dm_pad_set(0, 0, 0, 0, 0); return; }
     uint64_t b = 0;
     // Nintendo's letters follow the physical positions used by the host's
     // existing controllers: bottom B, right A, left Y, top X.
@@ -45,12 +41,11 @@ static void controller_read(GCExtendedGamepad *p) {
     if (p.dpad.right.pressed) b |= DM_BTN_RIGHT;
     if (p.dpad.up.pressed) b |= DM_BTN_UP;
     if (p.dpad.down.pressed) b |= DM_BTN_DOWN;
-    physical_state = (TVRemoteOutput){ b, p.leftThumbstick.xAxis.value * 32767, p.leftThumbstick.yAxis.value * 32767,
-        p.rightThumbstick.xAxis.value * 32767, p.rightThumbstick.yAxis.value * 32767 };
-    input_publish();
+    dm_pad_set(b, p.leftThumbstick.xAxis.value * 32767, p.leftThumbstick.yAxis.value * 32767,
+               p.rightThumbstick.xAxis.value * 32767, p.rightThumbstick.yAxis.value * 32767);
 }
 static void controllers_update(void) {
-    physical_state = (TVRemoteOutput){0}; input_publish();
+    dm_pad_set(0, 0, 0, 0, 0);
     for (GCController *c in GCController.controllers) {
         if (!c.extendedGamepad) continue;
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *p, GCControllerElement *element) {
@@ -60,9 +55,8 @@ static void controllers_update(void) {
     }
 }
 void front_tv_focus(int active) {
-    tv_active = !!active; tv_remote_cancel(&remote_state, 1);
-    physical_state = (TVRemoteOutput){0}; input_publish(); dm_input_set(0, 0, 0, 0, 0);
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"TVRemoteReset" object:nil];
+    tv_active = !!active;
+    dm_pad_set(0, 0, 0, 0, 0); dm_input_set(0, 0, 0, 0, 0);
     if (tv_layer) { dm_focus_set(active ? 1 : 3); guest_clock_freeze_for(1, !active); dm_gfx_suspend(!active); }
     NSError *error = nil;
     [AVAudioSession.sharedInstance setActive:!!active error:&error];
@@ -81,19 +75,15 @@ void front_tv_focus(int active) {
     } return self;
 }
 @end
-@interface TVRootVC : UIViewController
+@interface TVRootVC : GCEventViewController
 @property(strong, nonatomic) UILabel *preparationLabel;
-@property(strong, nonatomic) UILabel *remoteHint;
-@property(strong, nonatomic) UIView *remotePanel;
-@property(strong, nonatomic) UIPanGestureRecognizer *remotePan;
-@property(strong, nonatomic) NSMutableArray<UIButton *> *remoteButtons;
-@property(nonatomic) NSUInteger pulseSerial;
-- (void)updateRemoteHint;
+@property(nonatomic) BOOL launcherAsked;
 - (void)createGame;
 @end
 @implementation TVRootVC
 - (void)viewDidLoad {
     [super viewDidLoad]; self.view.backgroundColor = UIColor.blackColor;
+    self.controllerUserInteractionEnabled = NO;   // gamepads drive the game only (the settings screen turns it on while it shows)
     if (!front_tv_ready()) {
         UILabel *label = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 70, 70)];
         label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -105,9 +95,10 @@ void front_tv_focus(int active) {
 }
 - (void)createGame {
     [self.preparationLabel removeFromSuperview]; self.preparationLabel = nil;
+    if (tv_layer) return;
     TVMetalView *view = [[TVMetalView alloc] initWithFrame:self.view.bounds];
     view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:view]; tv_layer = (CAMetalLayer *)view.layer;
+    [self.view insertSubview:view atIndex:0]; tv_layer = (CAMetalLayer *)view.layer;   // under the settings screen when it shows
     NSError *error = nil; AVAudioSession *audio = AVAudioSession.sharedInstance;
     [audio setCategory:AVAudioSessionCategoryPlayback error:&error];
     [audio setPreferredSampleRate:48000 error:&error];
@@ -116,136 +107,27 @@ void front_tv_focus(int active) {
     [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { controllers_update(); }];
     [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { controllers_update(); }];
     controllers_update(); UIApplication.sharedApplication.idleTimerDisabled = YES;
-    remote_state.mode = (int)[NSUserDefaults.standardUserDefaults integerForKey:@"TVRemoteMode"];
-    if (remote_state.mode < TV_REMOTE_MOVE || remote_state.mode > TV_REMOTE_DPAD) remote_state.mode = TV_REMOTE_MOVE;
-    self.remotePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(remotePanned:)];
-    [self.view addGestureRecognizer:self.remotePan];
-    self.remoteHint = [[UILabel alloc] initWithFrame:CGRectMake(50, self.view.bounds.size.height - 66, self.view.bounds.size.width - 100, 42)];
-    self.remoteHint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
-    self.remoteHint.font = [UIFont systemFontOfSize:23 weight:UIFontWeightSemibold];
-    self.remoteHint.textColor = UIColor.whiteColor;
-    self.remoteHint.backgroundColor = [UIColor colorWithWhite:0 alpha:0.70];
-    self.remoteHint.textAlignment = NSTextAlignmentCenter;
-    self.remoteHint.accessibilityIdentifier = @"remote-hint";
-    [self.view addSubview:self.remoteHint]; [self updateRemoteHint];
-    [NSNotificationCenter.defaultCenter addObserverForName:@"TVRemoteReset" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-        self.pulseSerial++; [self updateRemoteHint];
-    }];
-    [self becomeFirstResponder];
 }
-- (BOOL)canBecomeFirstResponder { return YES; }
-- (NSArray<id<UIFocusEnvironment>> *)preferredFocusEnvironments {
-    return self.remotePanel && self.remoteButtons.count ? @[self.remoteButtons.firstObject] : @[];
-}
-- (void)updateRemoteHint {
-    NSArray *modes = @[@"MOVE", @"CAMERA", @"D-PAD"];
-    NSMutableArray *held = [NSMutableArray array];
-    for (NSArray *entry in @[@[@"L", @(DM_BTN_L)], @[@"R", @(DM_BTN_R)], @[@"ZL", @(DM_BTN_ZL)], @[@"ZR", @(DM_BTN_ZR)]])
-        if (remote_state.held & [entry[1] unsignedLongLongValue]) [held addObject:entry[0]];
-    self.remoteHint.text = [NSString stringWithFormat:@"%@  |  Click: A    Back: B    Play/Pause: all controls%@", modes[remote_state.mode],
-        held.count ? [@"  |  Holding: " stringByAppendingString:[held componentsJoinedByString:@" + "]] : @""];
-}
-- (void)remotePanned:(UIPanGestureRecognizer *)pan {
-    if (self.remotePanel || self.presentedViewController || !tv_active) return;
-    CGPoint d = [pan translationInView:self.view];
-    if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled || pan.state == UIGestureRecognizerStateFailed)
-        remote_state.x = remote_state.y = 0;
-    else {
-        remote_state.x = lrint(fmax(-1, fmin(1, d.x / 120.0)) * 32767);
-        remote_state.y = lrint(fmax(-1, fmin(1, -d.y / 120.0)) * 32767);
+static void launcher_done(void) { tv_settings_open = NO; controllers_update(); front_tv_start(); }
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (!self.launcherAsked) {   // once: the settings screen first, then the game (or straight to the game when the app has no settings)
+        self.launcherAsked = YES;
+        tv_settings_open = YES;
+        if (dm_show_launcher((__bridge void *)self, launcher_done)) return;
+        tv_settings_open = NO;
     }
-    input_publish();
+    if (!tv_settings_open) front_tv_start();
 }
-- (void)hideRemotePanel {
-    [self.remotePanel removeFromSuperview]; self.remotePanel = nil;
-    self.remoteButtons = nil; self.remotePan.enabled = YES;
-    tv_remote_cancel(&remote_state, 0); self.pulseSerial++; input_publish();
-    [self updateRemoteHint]; [self becomeFirstResponder]; [self setNeedsFocusUpdate];
-}
-- (void)showRemotePanel {
-    if (self.remotePanel) { [self hideRemotePanel]; return; }
-    tv_remote_cancel(&remote_state, 0); self.pulseSerial++; input_publish();
-    self.remotePan.enabled = NO;
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectInset(self.view.bounds, 80, 70)];
-    panel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    panel.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.96]; panel.layer.cornerRadius = 28;
-    panel.accessibilityIdentifier = @"remote-controls"; self.remotePanel = panel;
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(30, 20, panel.bounds.size.width - 60, 100)];
-    title.numberOfLines = 2; title.textAlignment = NSTextAlignmentCenter; title.textColor = UIColor.whiteColor;
-    title.font = [UIFont systemFontOfSize:28 weight:UIFontWeightSemibold];
-    title.text = @"Remote controls\nChoose a stick mode or press a game button. Hold switches stay on until released.";
-    [panel addSubview:title]; self.remoteButtons = [NSMutableArray array];
-    NSArray *labels = @[@"Resume / Move", @"Camera stick", @"D-pad", @"Release held buttons",
-        @"A", @"B", @"X", @"Y", @"L", @"R", @"ZL", @"ZR", @"+", @"−", @"L stick click", @"R stick click",
-        @"Hold L", @"Hold R", @"Hold ZL", @"Hold ZR"];
-    CGFloat width = (panel.bounds.size.width - 180) / 4;
-    for (NSUInteger i = 0; i < labels.count; i++) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.frame = CGRectMake(35 + (i % 4) * (width + 35), 150 + (i / 4) * ((panel.bounds.size.height - 175) / 5), width, (panel.bounds.size.height - 175) / 5 - 23);
-        b.tag = i; [b setTitle:labels[i] forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightSemibold];
-        b.accessibilityIdentifier = [@"remote-" stringByAppendingString:labels[i]];
-        [b addTarget:self action:@selector(remoteAction:) forControlEvents:UIControlEventPrimaryActionTriggered];
-        [panel addSubview:b]; [self.remoteButtons addObject:b];
-    }
-    [self.view addSubview:panel]; [self setNeedsFocusUpdate]; [self updateFocusIfNeeded];
-    fprintf(stderr, "tvOS Remote: controls opened\n");
-}
-- (void)remoteAction:(UIButton *)button {
-    NSInteger i = button.tag;
-    if (i < 3) {
-        tv_remote_mode(&remote_state, (int)i);
-        [NSUserDefaults.standardUserDefaults setInteger:i forKey:@"TVRemoteMode"];
-        fprintf(stderr, "tvOS Remote: mode=%ld\n", (long)i); [self hideRemotePanel]; return;
-    }
-    if (i == 3) { tv_remote_cancel(&remote_state, 1); input_publish(); [self updateRemoteHint]; return; }
-    static const uint64_t buttons[] = { DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR,
-        DM_BTN_PLUS, DM_BTN_MINUS, DM_BTN_LS, DM_BTN_RS, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR };
-    uint64_t bit = buttons[i - 4];
-    if (i >= 16) {
-        remote_state.held ^= bit; input_publish(); [self updateRemoteHint];
-        [button setTitle:[NSString stringWithFormat:@"%@ %@", remote_state.held & bit ? @"Release" : @"Hold", @[@"L", @"R", @"ZL", @"ZR"][i-16]] forState:UIControlStateNormal];
-        return;
-    }
-    // The focused button produces one bounded pulse, never an accidental hold.
-    remote_state.pulse = bit; input_publish(); NSUInteger serial = ++self.pulseSerial;
-    fprintf(stderr, "tvOS Remote: pulse=0x%llx\n", (unsigned long long)bit);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 180 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (self.pulseSerial != serial) return;
-        remote_state.pulse = 0; input_publish();
-    });
-}
-- (BOOL)remotePress:(UIPress *)press down:(BOOL)down {
-    if (!tv_active || self.presentedViewController || !self.remoteHint) return NO;
-    if (press.type == UIPressTypePlayPause) { if (down) [self showRemotePanel]; return YES; }
-    if (self.remotePanel) {
-        if (press.type == UIPressTypeMenu) { if (down) [self hideRemotePanel]; return YES; }
-        return NO;
-    }
-    uint64_t button = press.type == UIPressTypeSelect ? DM_BTN_A : press.type == UIPressTypeMenu ? DM_BTN_B : 0;
-    int direction = press.type == UIPressTypeLeftArrow ? TV_REMOTE_LEFT : press.type == UIPressTypeRightArrow ? TV_REMOTE_RIGHT :
-        press.type == UIPressTypeUpArrow ? TV_REMOTE_UP : press.type == UIPressTypeDownArrow ? TV_REMOTE_DOWN : 0;
-    if (!button && !direction) return NO;
-    if (down) { remote_state.pressed |= button; remote_state.directions |= direction; }
-    else { remote_state.pressed &= ~button; remote_state.directions &= ~direction; }
-    input_publish(); return YES;
-}
-- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
-    NSMutableSet *unhandled = [NSMutableSet set];
-    for (UIPress *p in presses) if (![self remotePress:p down:YES]) [unhandled addObject:p];
-    if (unhandled.count) [super pressesBegan:unhandled withEvent:event];
-}
-- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
-    NSMutableSet *unhandled = [NSMutableSet set];
-    for (UIPress *p in presses) if (![self remotePress:p down:NO]) [unhandled addObject:p];
-    if (unhandled.count) [super pressesEnded:unhandled withEvent:event];
-}
-- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
-    tv_remote_cancel(&remote_state, 0); input_publish();
-    [super pressesCancelled:presses withEvent:event];
-}
-- (void)viewDidAppear:(BOOL)animated { [super viewDidAppear:animated]; [self becomeFirstResponder]; front_tv_start(); }
 @end
+// TVLauncher.swift, after Play (the settings are in the environment): the screen leaves and controllers go back to the game
+void dm_tv_start(void *settings_view_controller, void *root_view_controller, void (*done)(void)) {
+    UIViewController *settings = (__bridge UIViewController *)settings_view_controller;
+    GCEventViewController *root = (__bridge GCEventViewController *)root_view_controller;
+    [settings willMoveToParentViewController:nil]; [settings.view removeFromSuperview]; [settings removeFromParentViewController];
+    root.controllerUserInteractionEnabled = NO;
+    done();
+}
 UIViewController *front_tv_root(void) { tv_root = [TVRootVC new]; return tv_root; }
 void front_tv_resources_ready(NSString *failure) {
     TVRootVC *root = (TVRootVC *)tv_root;
@@ -260,7 +142,8 @@ void front_tv_resources_ready(NSString *failure) {
         }
         root.preparationLabel.text = failure; return;
     }
-    [root createGame]; front_tv_start();
+    [root createGame];
+    if (!tv_settings_open) front_tv_start();
 }
 void *front_metal_layer(void) { return (__bridge void *)tv_layer; }
 int front_screen_max_fps(void) { return 60; }

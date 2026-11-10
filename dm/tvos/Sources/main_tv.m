@@ -15,6 +15,7 @@
 #include "front.h"
 #include "save_sync.h"
 #import "romfs_patch.h"
+#include "romfs_image.h"   // romfs_image_open: a RomFS image (dm/tools/romfs_image.py), as the iOS front end takes from Documents/romfs.img
 
 UIViewController *front_tv_root(void);
 void front_tv_focus(int active);
@@ -207,8 +208,25 @@ static void boot(void) {
     NSString *romfs = [res stringByAppendingPathComponent:@"romfs"];
     NSString *external = [writable stringByAppendingPathComponent:@"romfs"];
     if ([fm fileExistsAtPath:[external stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]]) romfs = external;
+    // One RomFS image copied to Caches/nxnative/romfs.img (devicectl copy to the app's data container): tvOS apps cannot write Documents, and a folder of
+    // thousands of files copies slowly. Only a complete image counts: its index is written last, so a copy cut off partway is skipped (romfs_image_open)
+    NSString *image = [writable stringByAppendingPathComponent:@"romfs.img"];
+    romfs_img *opened = romfs_image_open(image.fileSystemRepresentation);
+    BOOL imageReady = opened != NULL;
+    if (opened) romfs_image_close(opened);
+    else if (errno != ENOENT) fprintf(stderr, "[RED] tvOS boot: invalid RomFS image %s (errno=%d)\n", image.fileSystemRepresentation, errno);
+    if (imageReady) { romfs = image; fprintf(stderr, "tvOS boot: RomFS image %s\n", image.fileSystemRepresentation); }
+    // Add-on content (DLC), each DLC's RomFS image at aoc/<index>.img: copied beside romfs.img (Caches/nxnative/aoc), else carried in the app, as the iOS front end's
+    // aoc_locate. A DM_AOC_DIR from env.txt wins. The host mounts and counts the DLC from DM_AOC_DIR (hle_fs.c)
+    if (!getenv("DM_AOC_DIR")) for (NSString *d in @[[writable stringByAppendingPathComponent:@"aoc"], [res stringByAppendingPathComponent:@"aoc"]]) {
+        BOOL dir = NO;
+        if (![fm fileExistsAtPath:d isDirectory:&dir] || !dir) continue;
+        setenv("DM_AOC_DIR", d.fileSystemRepresentation, 0);
+        fprintf(stderr, "tvOS boot: DLC from %s\n", d.fileSystemRepresentation);
+        break;
+    }
     boot_romfs = romfs;
-    boot_ready = [fm fileExistsAtPath:[romfs stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]];
+    boot_ready = imageReady || [fm fileExistsAtPath:[romfs stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]];
     NSString *externalMSL = [writable stringByAppendingPathComponent:@"msl"];
     NSString *bundledMSL = [res stringByAppendingPathComponent:@"msl"];
     NSString *archiveSHA = [NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShaderArchiveSHA256"];
@@ -239,12 +257,18 @@ static void boot(void) {
     setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
     setenv("DM_SAVE", [writable stringByAppendingPathComponent:@"save"].fileSystemRepresentation, 0);
     setenv("DM_TEMP", [writable stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
+    // DM_GUEST_FILE (hle_svc.c): when the game's memory pool does not fit the room to tvOS's memory limit (about 2.2 GB), its memory goes into unlinked files mapped
+    // shared over the same addresses; file pages do not count in the footprint tvOS ends an app at (Cuphead on an A12 was killed with signal 9 at 2.0 GB)
+    setenv("DM_GUEST_FILE_DIR", NSTemporaryDirectory().fileSystemRepresentation, 0);
     NSString *msl = imported ? externalMSL : bundledMSL;
     setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
     setenv("DM_NVN_SHMAP", [res stringByAppendingPathComponent:@"dm/shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_FONT_DIR", [res stringByAppendingPathComponent:@"dm/font"].fileSystemRepresentation, 0);
-    setenv("DM_LANG", "zh-CN", 0); setenv("DM_PRESENT_INTERVAL", "game", 0);
+    NSString *language = [NSBundle.mainBundle objectForInfoDictionaryKey:@"DMLanguage"];   // the game language the build chose (prepare_project.py --language)
+    setenv("DM_LANG", language.length ? language.UTF8String : "en-US", 0); setenv("DM_PRESENT_INTERVAL", "game", 0);
     setenv("DM_PIPELINE_CACHE", "off", 0); setenv("DM_NVN_MIN_REDUCTION", "1", 0);
+    // Apple TV GPUs read no BC: BC6H / BC7 are stored decompressed, 4-8 times their size (Cuphead's backgrounds: 1076 MB). 2048 pixels is above a 1080p TV's needs (nvn_mtl_legacy.inc bc_skip)
+    setenv("DM_BC_MAX_DIM", "2048", 0);
     setenv("DM_NVN_CPU_DECODE_CACHE", "0", 0); setenv("DM_SHOW_FPS", "0", 0);
     chdir(writable.fileSystemRepresentation);
     memory_diag_start();

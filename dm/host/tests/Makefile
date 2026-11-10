@@ -150,7 +150,7 @@ cheats: $(B)/t_cheats
 $(GAME_H): FORCE
 	$(MAKE) -C .. game_profile GAME=$(GAME)
 $(B)/t_heap_size: t_heap_size.c ../hle_svc.c ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -fsanitize=undefined -I.. $(GINC) -o $@ t_heap_size.c
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -fsanitize=undefined -I.. $(GINC) -o $@ t_heap_size.c -framework CoreFoundation
 .PHONY: heap_size
 heap_size: $(B)/t_heap_size
 	$(B)/t_heap_size
@@ -340,7 +340,7 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 	$(B)/t_audio_spsc_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_hid_tsan
 
-MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
+MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I.. -framework CoreFoundation
 MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
 $(B)/t_svc_memory: $(MEM_DEPS) | $(B)
 	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c
@@ -363,7 +363,15 @@ memory-dirty: $(B)/t_svc_memory_dirty
 	$(B)/t_svc_memory_dirty
 memory-profile: $(B)/t_svc_memory
 	DM_TEST_BUILD=$(B) $(PYTHON) test_memory_profile.py
-run: memory memory-dirty memory-profile
+# The same test with the guest's memory in files (DM_GUEST_FILE, hle_svc.c), one file and then 64 MB files, made in the build folder; its last line says how many files held it
+# (0: the files could not be made there, and the guest stayed anonymous)
+GUEST_FILE_ENV = DM_GUEST_FILE=1 DM_GUEST_FILE_MIN_FREE=0 DM_GUEST_FILE_DIR="$(abspath $(B))"
+.PHONY: memory-file
+memory-file: $(B)/t_svc_memory $(B)/t_svc_memory_16k
+	$(GUEST_FILE_ENV) $(B)/t_svc_memory
+	$(GUEST_FILE_ENV) DM_GUEST_FILE_CHUNK=64M $(B)/t_svc_memory
+	$(GUEST_FILE_ENV) DM_GUEST_FILE_CHUNK=64M $(B)/t_svc_memory_16k
+run: memory memory-dirty memory-profile memory-file
 
 # A native blocking notification wait must release the thread's guest core.
 $(B)/t_notify_sched: t_notify_sched.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
