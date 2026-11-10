@@ -178,6 +178,7 @@ ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
 if [ -f "$ICON" ] && [ "${DM_TVOS:-0}" = 1 ]; then
   xcrun swift "$IOS_SOURCE/tools/tv_icon.swift" "$ICON" Gen/Assets.xcassets || die "tv_icon.swift: cannot make the Apple TV icon from $ICON"
+  sips -s format jpeg "$ICON" --out Gen/dm/icon.jpg > /dev/null || die "sips: cannot copy the icon $ICON"   # the settings screen shows it (SourcesTV/TVLauncher.swift): a layered icon cannot be read back
   echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
   t "Apple TV icon and top shelf image: $ICON"
 elif [ -f "$ICON" ]; then
