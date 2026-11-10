@@ -7,7 +7,7 @@ The `tvos` branch of this fork is seedds' nxnative with a tvOS target on top. Ea
 | Apple TV | Chip | Memory | NVN games (most Nintendo titles) | Vulkan / OpenGL games |
 |---|---|---|---|---|
 | 4K (1st generation) | A10X | 3 GB | no: needs Metal 4 | classic presenter, untested |
-| 4K (2nd generation) | A12 | 3 GB | no: needs Metal 4 | classic presenter: Super Mario Galaxy 1.3.1 boots; built and installed again after the merge of 2026-11-09 (tvOS 27.2); not play-tested |
+| 4K (2nd generation) | A12 | 3 GB | no: needs Metal 4 | classic presenter: Super Mario Galaxy 1.3.1 boots; built and installed again after the merge of 2026-11-09 (tvOS 27.2); not play-tested. Super Mario Galaxy 2 1.3.1 (v327680, from a profile derived from 1.4.0's) built and installed 2026-11-09; starts and runs on the Apple TV (reported by the player, 2026-11-09); not play-tested through |
 | 4K (3rd generation) | A15 | 4 GB | yes (tested upstream: Super Mario Odyssey, Tears of the Kingdom, Animal Crossing) | yes |
 | 4K (4th generation) | A19 | 8 GB | expected to, untested | expected to, untested |
 
