@@ -7,7 +7,7 @@ The `tvos` branch of this fork is seedds' nxnative with a tvOS target on top. Ea
 | Apple TV | Chip | Memory | NVN games (most Nintendo titles) | Vulkan / OpenGL games |
 |---|---|---|---|---|
 | 4K (1st generation) | A10X | 3 GB | no: needs Metal 4 | classic presenter, untested |
-| 4K (2nd generation) | A12 | 3 GB | no: needs Metal 4 | classic presenter: Super Mario Galaxy 1.3.1 boots; built and installed again after the merge of 2026-11-09 (tvOS 27.2); not play-tested. Super Mario Galaxy 2 1.3.1 (v327680, from a profile derived from 1.4.0's) built and installed 2026-11-09; starts and runs on the Apple TV (reported by the player, 2026-11-09); not play-tested through |
+| 4K (2nd generation) | A12 | 3 GB | no: needs Metal 4 (Cuphead 1.3.7, 2026-11-09: the settings screen opens, then at Play `[nvn-mtl] FATAL the Metal device Apple A12 GPU has no Metal 4` and the app closes) | classic presenter: Super Mario Galaxy 1.3.1 boots; built and installed again after the merge of 2026-11-09 (tvOS 27.2); not play-tested. Super Mario Galaxy 2 1.3.1 (v327680, from a profile derived from 1.4.0's) built and installed 2026-11-09; starts and runs on the Apple TV (reported by the player, 2026-11-09); not play-tested through |
 | 4K (3rd generation) | A15 | 4 GB | yes (tested upstream: Super Mario Odyssey, Tears of the Kingdom, Animal Crossing) | yes |
 | 4K (4th generation) | A19 | 8 GB | expected to, untested | expected to, untested |
 
@@ -62,7 +62,7 @@ python3 scripts/build_tvos_from_nsp.py "$HOME/Games/Super Mario Odyssey" -k "$HO
   --team-id TEAM_ID --device APPLE_TV_ID --language es-419 --mode docked
 ```
 
-The first build of a game extracts it, rewrites its code and builds its shaders (30 to 60 minutes); later builds reuse `<game folder>/<title ID>_build`. Without `--device` the app is built and not installed. With it, the app is installed and the game's RomFS image is copied to the app's `Library/Caches/romfs.img` (several GB over the network). Do not share the built app: it holds rewritten game code.
+The first build of a game extracts it, rewrites its code and builds its shaders (30 to 60 minutes); later builds reuse `<game folder>/<title ID>_build`. Without `--device` the app is built and not installed. The DLC the NSP script extracted (`<build>/aoc`) goes into the app as `aoc/` (the script passed none before, so The Delicious Last Course was left out of Cuphead). With `--device`, the app is installed and the game's RomFS image is copied to the app's `Library/Caches/romfs.img` (several GB over the network). Do not share the built app: it holds rewritten game code.
 
 A game already built as a Mac app (`--platform mac-app`) reuses its extraction and its captured Vulkan shaders; the shaders are translated again for iOS/tvOS (Super Mario Galaxy: about 1.5 minutes, then the Xcode build and a 3.2 GB copy).
 
@@ -77,4 +77,5 @@ Keep the tvOS changes in files upstream does not have (`docs/apple-tv-build.md`,
 After a merge, the usual breakage is new iOS-only code reaching the tvOS target. What the merge of 2026-11-09 broke, and how it was fixed:
 
 - **New iOS Swift sources.** Upstream added `GameMenu.swift` (the touch gamepad's in-game menu) and `DmHostingController.swift` (orientations). tvOS has neither `UIInterfaceOrientationMask` nor the launcher model they use (`LauncherSettings.swift`, already left out), so the Swift compile failed. `project_tv.yml` leaves both out, and `SourcesTV/TVGameMenu.m` gives `DmGamepad.m` its `dm_game_menu` with no menu (tvOS picks settings before the game starts). A new file under `dm/ios/Sources` goes into `project_tv.yml`'s `excludes` unless it builds for tvOS.
+- **NVN shader libraries as one file.** Upstream now packs an NVN game's iOS shader libraries as `shader/ios/b-<chain>.img` instead of the folder `b-<chain>/`; `build_tvos_from_nsp.py` checked only the folder and stopped with `the NSP script finished without game files or shaders` (found on Cuphead). It now takes either, as `build_ipa.sh` does.
 - **New frameworks.** `gen_build.py` checks the host's frameworks against the iOS SDK only, so `WebKit` (upstream's web applet, `web_apple.m`, which has no tvOS body) reached the link: `ld: framework 'WebKit' not found`. `build_ipa.sh` with `DM_TVOS=1` now drops every framework the tvOS SDK lacks (today `IOKit` and `WebKit`) and logs `tvOS: <framework> is not in the tvOS SDK, left out of the link`.

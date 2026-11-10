@@ -51,7 +51,8 @@ def build_dir(folder: Path):
 
 def prepared(build: Path, package: str) -> bool:
     shaders = build / 'shader/ios'
-    libs = (shaders / f'b-{chain()}/inputs.tsv', shaders / 'vk/vk_shaders.metallib', shaders / 'gl/gl_shaders.metallib')
+    # an NVN game's libraries are the folder b-<chain> or, since upstream packs them as one file, b-<chain>.img beside it (dm/tools/shader_lib.py; build_ipa.sh takes either)
+    libs = (shaders / f'b-{chain()}/inputs.tsv', shaders / f'b-{chain()}.img', shaders / 'vk/vk_shaders.metallib', shaders / 'gl/gl_shaders.metallib')
     return (build / 'extract' / package / 'RomFS.img').is_file() and any(p.is_file() for p in libs)
 
 
@@ -87,7 +88,9 @@ def main() -> None:
     bundle = a.bundle_id or f'org.nxnative.{tid.lower()}.tv'
     project, derived = build / 'tvos-xcode', build / 'tvos-derived'
     romfs = build / 'extract' / package / 'RomFS.img'
-    penv = dict(env, GAME=tid, W=str(build), PATCHED=str(build / f'patched_{package}'), ROMFS=str(romfs), MSL_IOS=str(build / 'shader/ios'), AOC='',
+    aoc = build / 'aoc'   # the DLC the NSP script extracted (one image per add-on index); build_ipa.sh puts it into the app as aoc/ and the host mounts it
+    penv = dict(env, GAME=tid, W=str(build), PATCHED=str(build / f'patched_{package}'), ROMFS=str(romfs), MSL_IOS=str(build / 'shader/ios'),
+                AOC=str(aoc) if aoc.is_dir() and any(aoc.iterdir()) else '',
                 DM_TVOS='1', DM_COPY_ROMFS='NO', DM_SHOW_FPS='1' if a.show_fps else '0', DM_BUNDLE_ID=bundle, DM_TEAM_ID=a.team_id,
                 DM_XCODE_PROJECT_DIR=str(project), DM_XCODE_DERIVED_DATA=str(derived), FONT_PY=sys.executable)
     if a.language:
