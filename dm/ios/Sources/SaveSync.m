@@ -7,10 +7,12 @@
 #include <string.h>
 #include <unistd.h>
 #include "save_sync.h"
+#include "SaveBackend.h"
 
 #define MATERIALIZE_S 60   // the longest a fetch waits for a listed iCloud item to download: the launcher's report (SaveSyncReport.waitMs); the host stops waiting sooner at the mount (FETCH_MS)
 
 int front_save_sync_fetch(const char *cloud, const char *local) {
+    if (dmck_owns(cloud)) return dmck_fetch(cloud, local);   // iCloud through CloudKit (SaveBackend.h)
     @autoreleasepool {
         NSFileManager *fm = [NSFileManager new];
         NSURL *src = [NSURL fileURLWithPath:@(cloud)], *dst = [NSURL fileURLWithPath:@(local)];
@@ -54,6 +56,7 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
 }
 
 int front_save_sync_store(const char *local, const char *cloud) {
+    if (dmck_owns(cloud)) return dmck_store(local, cloud);   // iCloud through CloudKit (SaveBackend.h)
     @autoreleasepool {
         NSFileManager *fm = [NSFileManager new];
         NSURL *dst = [NSURL fileURLWithPath:@(cloud)];

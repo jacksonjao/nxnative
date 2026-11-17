@@ -22,6 +22,8 @@ sys.path.insert(0, str(HERE.parent / 'tools'))
 import romfs as rfs
 import shader_lib
 import vol_space   # the space a build may write, with what APFS frees on demand
+sys.path.insert(0, str(HERE))
+import cloudkit_mac   # iCloud through CloudKit: DM_CLOUDKIT_CONTAINER, DM_MAC_PROVISIONING_PROFILE
 MODULE_FILES = ('*.patched.bin', '*.fixups.tsv', '*.gates.tsv', '*.cuts.tsv', '*.obs.tsv', '*.changed.tsv', 'nro.tsv')   # what the host reads from the module folder (build_ipa.sh copies the same tables but changed.tsv: the iPhone's cheats never write code)
 MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json); an NVN game's b-<chain> goes in as one file of them (shader_lib.py)
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
@@ -91,7 +93,7 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
 
 
 def swift_sources():   # the settings window, with the iOS launcher's model, rows and cloud-save report
-    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift']
+    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift'] + cloudkit_mac.swift_sources(HERE.parent)
 
 
 def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
@@ -129,6 +131,7 @@ def info_plist(a, minos, icon):
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
+    cloudkit_mac.info(p)   # DMCloudKitContainer with DM_CLOUDKIT_CONTAINER
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
         p['DMSettings'] = settings_rules(listed)
@@ -157,8 +160,9 @@ def strip_detritus(app):   # the "._name" files a copy from or onto an exFAT vol
 def sign(app, identity, codesign, nested=()):   # the new data bundles and the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
     strip_detritus(app)   # before codesign reads the bundle, so that a build folder or an output folder on exFAT is not a signing failure
     def refused(e): return any(s in str(e) for s in ('detritus', '._', 'not signed at all'))   # Finder information or resource forks on copied files, "._name" files
+    ck = cloudkit_mac.sign_args(app)   # the launcher's iCloud entitlements, with DM_MAC_PROVISIONING_PROFILE
     def first(target):   # → None when signed, else why not
-        try: run([codesign, '--force', '--sign', identity, target])
+        try: run([codesign, '--force', '--sign', identity, *(ck if target == app else ()), target])
         except SystemExit as e: return e
     # The new data bundles at once: codesign reads a bundle on one core, at about 180 MB/s, and each bundle is its own (Ocarina of Time's shader libraries and pipeline archive, the
     # two a build after a chain change makes anew: 70 s one after the other, 38 s together, the same signatures). One it refuses is signed again below, alone, after the others
@@ -169,7 +173,7 @@ def sign(app, identity, codesign, nested=()):   # the new data bundles and the i
         if not refused(e): raise e
         subprocess.run(['xattr', '-cr', str(app)], capture_output=True)   # Finder information or resource forks on copied files: codesign refuses them
         strip_detritus(app)
-        run([codesign, '--force', '--sign', identity, target])
+        run([codesign, '--force', '--sign', identity, *(ck if target == app else ()), target])
     strip_detritus(app)   # codesign sets an attribute on what it signs, which is a "._name" file again on exFAT: the signature still verifies without it, and a later --force would refuse it
 
 

@@ -1,6 +1,7 @@
 // See CloudSaves.h.
 
 #import "CloudSaves.h"
+#include "SaveBackend.h"
 
 static NSString *const kCloudSaves = @"cloudSavesBookmark";
 
@@ -65,6 +66,7 @@ void dm_clear_cloud_saves(void) {
 }
 
 void dm_cloud_saves_env(void) {
+    if (dm_save_backend_env()) return;   // this device only, or iCloud through CloudKit, chosen in the settings (SaveBackend.h)
     static BOOL fromPick;   // DM_SAVE_SYNC is the one this set, not an env file's
     if (getenv("DM_SAVE_SYNC") && !fromPick) return;
     BOOL stale = NO;

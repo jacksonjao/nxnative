@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "save_sync.h"
+#include "SaveBackend.h"
 
 #define STORE_LIMIT (900 * 1024)
 #define HEADER 12   // "DMZ2" (LZFSE) or "DMZ1" (LZMA, before), then the packed save's size as a little-endian u64
@@ -35,6 +36,7 @@ static NSUInteger others_size(NSUserDefaults *d, NSString *key) {
 }
 
 int front_save_sync_store(const char *local, const char *cloud) {
+    if (dmck_owns(cloud)) return dmck_store(local, cloud);   // iCloud through CloudKit (SaveBackend.h)
     @autoreleasepool {
         NSData *raw = [NSData dataWithContentsOfFile:@(local)];
         if (!raw.length) { fprintf(stderr, "[dm] [RED] tv saves: cannot read %s\n", local); return 0; }
@@ -64,6 +66,7 @@ int front_save_sync_store(const char *local, const char *cloud) {
 }
 
 int front_save_sync_fetch(const char *cloud, const char *local) {
+    if (dmck_owns(cloud)) return dmck_fetch(cloud, local);   // iCloud through CloudKit (SaveBackend.h)
     @autoreleasepool {
         NSString *key = store_key(cloud);
         NSData *z = [NSUserDefaults.standardUserDefaults dataForKey:key] ?: [NSData dataWithContentsOfFile:spill_path(key)];
@@ -82,6 +85,7 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
 
 // Which folder a save goes through: named after the folder it lives in, so each player's stays their own. A launch environment that sets DM_SAVE_SYNC wins
 void dm_cloud_saves_env(void) {
+    if (dm_save_backend_env()) return;   // iCloud through CloudKit, chosen in the settings (SaveBackend.h)
     if (getenv("DM_SAVE_SYNC")) return;
     NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
     const char *save = getenv("DM_SAVE");
