@@ -25,6 +25,7 @@ TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_chain  # noqa: E402
 import dmsh_mtlcache  # noqa: E402
+import dmsh_rt_compile  # noqa: E402
 import shader_cache  # noqa: E402
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import romfs  # noqa: E402
@@ -47,10 +48,10 @@ class ShaderCache(unittest.TestCase):
                        DUAL_WANT=set(), BF_WANT=set(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'',
                        STAGE='stage/test', want=set(), OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), OLD_IMAGE={}, shader_lib=shader_lib, romfs=romfs, shutil=shutil,
-                       STAMP_BEFORE=None, INPUTS='inputs')
+                       STAMP_BEFORE=None, INPUTS='inputs', dmsh_rt_compile=dmsh_rt_compile, RT_KEYS=set())
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
-                 'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library', 'submit', 'results'}
+                 'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library', 'owned_output', 'submit', 'results'}
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         self.tree = tree
         nodes: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
@@ -266,6 +267,18 @@ class ShaderCache(unittest.TestCase):
         img = shader_lib.view(out)
         self.assertEqual(sorted(p.name for p in img.iterdir()), sorted([a + '_b.metal', a + '_b.metallib', b + '_b.metal', b + '_b.metallib', 'inputs.tsv']))
         self.assertEqual((img / (a + '_b.metallib')).read_bytes(), a.encode())
+
+    def test_a_stage_the_cache_cannot_take_leaves_every_file_on_disk(self):   # a full drive: the stage's batch is rolled back, earlier writes too, so none of its files may go
+        out, key = Path(self.ns['out']), '1' * 16
+        (out / (key + '_b.json')).write_text('{}'); (out / (key + '_b.metallib')).write_bytes(b'x' * 200000)
+        store = self.ns['STORE']; store.put('before', b'0')
+        n = store.db.execute('PRAGMA page_count').fetchone()[0]; store.db.execute(f'PRAGMA max_page_count={n + 2}')
+        with mock.patch('builtins.print'): self.ns['commit'](key)
+        self.assertTrue(store.full); self.assertEqual(store.names('stage/'), set())
+        self.assertEqual(sorted(p.name for p in out.iterdir()), [key + '_b.json', key + '_b.metallib'])
+        (out / 'inputs.tsv').write_text('game\tid\ninputs\tinputs\n')
+        self.ns['publish_library']('mac')
+        self.assertEqual(sorted(p.name for p in shader_lib.view(out).iterdir()), sorted([key + '_b.json', key + '_b.metallib', 'inputs.tsv']))
 
     def test_partial_build_keeps_the_image_less_the_keys_it_builds(self):
         out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16

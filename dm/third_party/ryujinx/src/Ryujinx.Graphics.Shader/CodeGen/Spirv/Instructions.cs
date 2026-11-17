@@ -12,7 +12,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
     using SpvInstruction = Spv.Generator.Instruction;
     using SpvLiteralInteger = Spv.Generator.LiteralInteger;
 
-    static class Instructions
+    static partial class Instructions
     {
         private const MemorySemanticsMask DefaultMemorySemantics =
             MemorySemanticsMask.ImageMemory |
@@ -53,6 +53,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.BitwiseNot,               GenerateBitwiseNot);
             Add(Instruction.BitwiseOr,                GenerateBitwiseOr);
             Add(Instruction.Call,                     GenerateCall);
+            Add(Instruction.RayQueryTrace,            GenerateRayQueryTrace);
             Add(Instruction.Ceiling,                  GenerateCeiling);
             Add(Instruction.Clamp,                    GenerateClamp);
             Add(Instruction.ClampU32,                 GenerateClampU32);
@@ -616,28 +617,61 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
         }
 
-        // nxnative: buffer image offsets (TranslationFlags.MetalBufferImageBias). Metal makes a buffer texture only at an aligned offset of its buffer, and an Apple GPU
-        // addresses a view below that alignment from the boundary below its offset, so every access of an image at a pool offset 8 mod 16 landed two R32 elements early
-        // (Assassin's Creed II's occlusion culling marked object k - 2 visible, GitHub PR #1399). The host binds such an image as a view from that boundary, wider by the
-        // elements in between, and puts their count in the offset table (Constants.NxBufferImageBiasBank); the coordinate moves by it. A coordinate before the image,
-        // -bias to -1, would move into the bytes in between: it keeps its value, past the view's end as before, so a bounds check of the view's size (the atomics')
-        // and Metal's own drop it. An image without a table entry (an array of them, or past the table) is accessed unchanged
+        // nxnative: buffer texture offsets (TranslationFlags.MetalBufferImageBias). Metal makes a buffer texture only at an offset of its buffer aligned as the device
+        // asks (minimumTextureBufferAlignmentForPixelFormat: 16 bytes on an M4 Pro), and the GPU addresses a view made below it from the boundary below its offset, so
+        // every access of an image at a pool offset 8 mod 16 landed two R32 elements early (Assassin's Creed II's occlusion culling marked object k - 2 visible, GitHub
+        // PR #1399). The host makes each such buffer texture's view from that boundary, wider by the elements in between (nvn_mtl.m tex_mtl), and puts their count in the
+        // offset table (Constants.NxBufferImageBiasBank); every coordinate of a buffer image or of a buffer texture read through a texture slot moves by it, and a size
+        // query gives the view's width less it. A coordinate before the texture, -bias to -1, would move into the bytes in between: it keeps its value, past the view's
+        // end as before, so a bounds check of the view's size (the atomics') and Metal's own drop it. An array of buffer textures has an entry per element, and an access
+        // reads the entry of the element it indexes (its first source, as GenerateSampledImageLoad reads it). One without a table entry (an array of images, or past the
+        // table) is accessed unchanged
+        private static SpvInstruction BufferBias(CodeGenContext context, AstTextureOperation texOp, bool rowWidth = false)
+        {
+            bool isImage = texOp.Inst.IsImage();
+
+            if (!(rowWidth ? context.Properties.BufferRowWidths : isImage ? context.Properties.BufferImageBiases : context.Properties.BufferTextureBiases).TryGetValue(texOp.GetTextureSetAndBinding(), out int index))
+            {
+                return null;
+            }
+
+            SpvInstruction u32 = context.TypeU32();
+            SpvInstruction s32 = context.TypeS32();
+            SpvInstruction element, component;
+
+            if (!isImage && context.Samplers[texOp.GetTextureSetAndBinding()].IsIndexed)
+            {
+                SpvInstruction entry = context.IAdd(u32, context.Bitcast(u32, context.Get(AggregateType.S32, texOp.GetSource(0))), context.Constant(u32, index));
+                element = context.ShiftRightLogical(u32, entry, context.Constant(u32, 2));
+                component = context.BitwiseAnd(u32, entry, context.Constant(u32, 3));
+            }
+            else
+            {
+                element = context.Constant(s32, index >> 2);
+                component = context.Constant(s32, index & 3);
+            }
+
+            SpvInstruction biasPointer = context.AccessChain(
+                context.TypePointer(StorageClass.Uniform, u32),
+                context.ConstantBuffers[context.Properties.BufferImageBiasBinding],
+                context.Constant(s32, 0),
+                element,
+                component);
+
+            return context.Load(u32, biasPointer);
+        }
+
         private static SpvInstruction BiasBufferImageCoordinate(CodeGenContext context, AstTextureOperation texOp, SpvInstruction coordinate)
         {
-            if (!context.Properties.BufferImageBiases.TryGetValue(texOp.GetTextureSetAndBinding(), out int index))
+            SpvInstruction bias = BufferBias(context, texOp);
+
+            if (bias == null)
             {
                 return coordinate;
             }
 
             SpvInstruction u32 = context.TypeU32();
             SpvInstruction s32 = context.TypeS32();
-            SpvInstruction biasPointer = context.AccessChain(
-                context.TypePointer(StorageClass.Uniform, u32),
-                context.ConstantBuffers[context.Properties.BufferImageBiasBinding],
-                context.Constant(s32, 0),
-                context.Constant(s32, index >> 2),
-                context.Constant(s32, index & 3));
-            SpvInstruction bias = context.Load(u32, biasPointer);
             SpvInstruction original = context.Bitcast(u32, coordinate);
             SpvInstruction moved = context.IAdd(u32, original, bias);
             SpvInstruction before = context.ULessThan(context.TypeBool(), moved, bias);
@@ -1369,6 +1403,28 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             SpvInstruction pCoords = AssemblePVector(pCount);
 
+            if (intCoords && texOp.Type == SamplerType.TextureBuffer)
+            {
+                pCoords = BiasBufferImageCoordinate(context, texOp, pCoords);   // nxnative: a buffer texture (see BiasBufferImageCoordinate)
+            }
+
+            if (intCoords && texOp.Flags.HasFlag(TextureFlags.RowWrap))
+            {
+                SpvInstruction u32 = context.TypeU32();
+                SpvInstruction x = context.CompositeExtract(context.TypeS32(), pCoords, 0);
+                SpvInstruction y = context.CompositeExtract(context.TypeS32(), pCoords, 1);
+                SpvInstruction linear = context.BitwiseOr(u32, context.Bitcast(u32, x), context.ShiftLeftLogical(u32, context.Bitcast(u32, y), context.Constant(u32, 14)));
+                SpvInstruction moved = context.Bitcast(u32, BiasBufferImageCoordinate(context, texOp, context.Bitcast(context.TypeS32(), linear)));
+                if (BufferBias(context, texOp, true) is SpvInstruction width)
+                {
+                    SpvInstruction valid = context.LogicalOr(context.TypeBool(), context.IEqual(context.TypeBool(), width, context.Constant(u32, 0)), context.ULessThan(context.TypeBool(), linear, width));
+                    moved = context.Select(u32, valid, moved, context.Constant(u32, uint.MaxValue));
+                }
+                pCoords = context.CompositeConstruct(context.TypeVector(context.TypeS32(), 2),
+                    context.Bitcast(context.TypeS32(), context.BitwiseAnd(u32, moved, context.Constant(u32, 0x3fff))),
+                    context.Bitcast(context.TypeS32(), context.ShiftRightLogical(u32, moved, context.Constant(u32, 14))));
+            }
+
             if (!intCoords)
             {
                 SpvInstruction nfFp32 = context.TypeFP32();
@@ -1695,11 +1751,23 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 else
                 {
                     result = context.ImageQuerySize(resultType, image);
+
+                    // nxnative: a buffer texture's view is wider by the elements before its offset (see BiasBufferImageCoordinate): its size leaves them out
+                    if (type == SamplerType.TextureBuffer && BufferBias(context, texOp) is SpvInstruction bias)
+                    {
+                        result = context.ISub(context.TypeS32(), result, context.Bitcast(context.TypeS32(), bias));
+                    }
                 }
 
                 if (dimensions != 1)
                 {
                     result = context.CompositeExtract(context.TypeS32(), result, texOp.Index);
+                }
+
+                if (texOp.Index == 0 && BufferBias(context, texOp, true) is SpvInstruction logicalWidth)
+                {
+                    // Zero marks an ordinary 1D texture: keep Metal's width.
+                    result = context.Select(context.TypeS32(), context.INotEqual(context.TypeBool(), logicalWidth, context.Constant(context.TypeU32(), 0)), context.Bitcast(context.TypeS32(), context.Select(context.TypeU32(), context.ULessThan(context.TypeBool(), logicalWidth, context.Constant(context.TypeU32(), 16384)), logicalWidth, context.Constant(context.TypeU32(), 16384))), result);
                 }
 
                 return new OperationResult(AggregateType.S32, result);
@@ -1815,19 +1883,29 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             AstOperation operation,
             Func<SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction> emitU)
         {
-            SpvInstruction elemPointer = GetStoragePointer(context, operation, out AggregateType varType);
+            bool bounded = TryGetBoundedStoragePointer(context, operation, out SpvInstruction elemPointer, out AggregateType varType, out SpvInstruction inBounds);
+
+            if (!bounded)
+            {
+                elemPointer = GetStoragePointer(context, operation, out varType);
+            }
 
             SpvInstruction value = context.Get(varType, operation.GetSource(operation.SourcesCount - 1));
 
             SpvInstruction one = context.Constant(context.TypeU32(), 1);
             SpvInstruction zero = context.Constant(context.TypeU32(), 0);
 
-            return new OperationResult(varType, emitU(context.GetType(varType), elemPointer, one, zero, value));
+            return BoundedAtomic(context, varType, bounded ? inBounds : null, () => emitU(context.GetType(varType), elemPointer, one, zero, value));
         }
 
         private static OperationResult GenerateAtomicMemoryCas(CodeGenContext context, AstOperation operation)
         {
-            SpvInstruction elemPointer = GetStoragePointer(context, operation, out AggregateType varType);
+            bool bounded = TryGetBoundedStoragePointer(context, operation, out SpvInstruction elemPointer, out AggregateType varType, out SpvInstruction inBounds);
+
+            if (!bounded)
+            {
+                elemPointer = GetStoragePointer(context, operation, out varType);
+            }
 
             SpvInstruction value0 = context.Get(varType, operation.GetSource(operation.SourcesCount - 2));
             SpvInstruction value1 = context.Get(varType, operation.GetSource(operation.SourcesCount - 1));
@@ -1835,7 +1913,87 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             SpvInstruction one = context.Constant(context.TypeU32(), 1);
             SpvInstruction zero = context.Constant(context.TypeU32(), 0);
 
-            return new OperationResult(varType, context.AtomicCompareExchange(context.GetType(varType), elemPointer, one, zero, zero, value1, value0));
+            return BoundedAtomic(context, varType, bounded ? inBounds : null, () => context.AtomicCompareExchange(context.GetType(varType), elemPointer, one, zero, zero, value1, value0));
+        }
+
+        // nxnative: an atomic on a bounded storage buffer (TranslationFlags.MetalStorageBounds) runs only inside the memory the host bound, and outside it gives 0 and leaves
+        // memory alone, as an atomic on an unmapped page of the console's GPU does (its write is dropped). inBounds null: an ordinary atomic
+        private static OperationResult BoundedAtomic(CodeGenContext context, AggregateType varType, SpvInstruction inBounds, Func<SpvInstruction> emit)
+        {
+            if (inBounds == null)
+            {
+                return new OperationResult(varType, emit());
+            }
+
+            SpvInstruction valid = context.Label();
+            SpvInstruction invalid = context.Label();
+            SpvInstruction merge = context.Label();
+            context.SelectionMerge(merge, SelectionControlMask.MaskNone);
+            context.BranchConditional(inBounds, valid, invalid);
+            context.AddLabel(valid);
+            SpvInstruction result = emit();
+            context.Branch(merge);
+            context.AddLabel(invalid);
+            context.Branch(merge);
+            context.AddLabel(merge);
+
+            SpvInstruction type = context.GetType(varType);
+            SpvInstruction zero = varType == AggregateType.S32 ? context.Constant(type, 0) : context.Constant(type, 0u);
+
+            return new OperationResult(varType, context.Phi(type, result, valid, zero, invalid));
+        }
+
+        // nxnative: a storage buffer whose address the shader takes from a game uniform slot or the push constants has no size (TranslationFlags.MetalStorageBounds). On the
+        // console the shader reads the GPU's page table as far as it indexes from that address: the pages mapped there, and 0 for an unmapped one (a sparse pool's page the game
+        // has not mapped; a write there is dropped). The host binds the memory pool, or a sparse pool's mapped run, that holds the address, and a Metal buffer has no bounds of
+        // its own, so a read past the run reached whatever lay after it in the GPU's address space: PRAGMATA's GI voxeliser ef4ad01151918469 reads its surfel colours 0x150000
+        // bytes and more from the base of a 1 GB sparse pool that has 0xc0000 bytes mapped there, and the other memory's bytes became hot colours that the GI spread through the
+        // R53 hangar (GitHub issue #2618). So each access compares its word index with the bound memory, from the host's length table (Constants.NxStorageLengthsBank): the
+        // words readable before the address B and B plus those from it on T, one unsigned comparison idx + B < T for both ends. Out of bounds a load reads word 0 and gives 0, and a
+        // store or an atomic is skipped (BoundedAtomic). → false for another storage kind or an unbounded buffer; the pointer then comes from GetStoragePointer
+        private static bool TryGetBoundedStoragePointer(CodeGenContext context, AstOperation operation, out SpvInstruction pointer, out AggregateType varType, out SpvInstruction inBounds)
+        {
+            pointer = null;
+            inBounds = null;
+            varType = AggregateType.Invalid;
+
+            if (operation.StorageKind != StorageKind.StorageBuffer ||
+                operation.GetSource(0) is not AstOperand { Type: OperandType.Constant } bindingIndex ||
+                !context.Properties.BoundedStorageBuffers.TryGetValue(bindingIndex.Value, out int lengthIndex))
+            {
+                return false;
+            }
+
+            int values = operation.Inst == Instruction.AtomicCompareAndSwap ? 2 : operation.Inst == Instruction.Store || operation.Inst.IsAtomic() ? 1 : 0;
+
+            if (operation.SourcesCount - values != 3 || operation.GetSource(1) is not AstOperand { Type: OperandType.Constant } fieldIndex)
+            {
+                throw new InvalidOperationException($"A storage buffer access with {operation.SourcesCount} sources cannot be bounded (binding {bindingIndex.Value}).");
+            }
+
+            if (context.Properties.StorageLengthsBinding < 0)
+            {
+                throw new InvalidOperationException($"A bounded storage buffer has no length table (binding {bindingIndex.Value}).");
+            }
+
+            SpvInstruction u32 = context.TypeU32();
+            SpvInstruction s32 = context.TypeS32();
+            SpvInstruction table = context.ConstantBuffers[context.Properties.StorageLengthsBinding];
+
+            SpvInstruction Word(int k) => context.Load(u32, context.AccessChain(context.TypePointer(StorageClass.Uniform, u32), table,
+                context.Constant(s32, 0), context.Constant(s32, k >> 2), context.Constant(s32, k & 3)));
+
+            SpvInstruction before = Word(2 * lengthIndex);
+            SpvInstruction total = Word(2 * lengthIndex + 1);
+            SpvInstruction index = context.Get(AggregateType.S32, operation.GetSource(2));
+            inBounds = context.ULessThan(context.TypeBool(), context.IAdd(u32, context.Bitcast(u32, index), before), total);
+
+            StructureField field = context.Properties.StorageBuffers[bindingIndex.Value].Type.Fields[fieldIndex.Value];
+            varType = field.Type & AggregateType.ElementTypeMask;
+            pointer = context.AccessChain(context.TypePointer(StorageClass.Uniform, context.GetType(varType)), context.StorageBuffers[bindingIndex.Value],
+                context.Get(AggregateType.S32, fieldIndex), context.Select(s32, inBounds, index, context.Constant(s32, 0)));
+
+            return true;
         }
 
         private static OperationResult GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)
@@ -1848,6 +2006,33 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             if (!isStore && operation.StorageKind == StorageKind.ConstantBuffer && TryGenerateBoundedUniformLoad(context, operation, out OperationResult bounded))
             {
                 return bounded;
+            }
+
+            if (TryGetBoundedStoragePointer(context, operation, out SpvInstruction boundedPointer, out AggregateType boundedType, out SpvInstruction inBounds))
+            {
+                if (isStore)
+                {
+                    SpvInstruction valid = context.Label();
+                    SpvInstruction merge = context.Label();
+                    context.SelectionMerge(merge, SelectionControlMask.MaskNone);
+                    context.BranchConditional(inBounds, valid, merge);
+                    context.AddLabel(valid);
+                    context.Store(boundedPointer, context.Get(boundedType, operation.GetSource(operation.SourcesCount - 1)));
+                    context.Branch(merge);
+                    context.AddLabel(merge);
+
+                    return OperationResult.Invalid;
+                }
+
+                SpvInstruction boundedSpvType = context.GetType(boundedType);
+                SpvInstruction boundedZero = boundedType switch
+                {
+                    AggregateType.FP32 => context.Constant(boundedSpvType, 0f),
+                    AggregateType.S32 => context.Constant(boundedSpvType, 0),
+                    _ => context.Constant(boundedSpvType, 0u),
+                };
+
+                return new OperationResult(boundedType, context.Select(boundedSpvType, inBounds, context.Load(boundedSpvType, boundedPointer), boundedZero));
             }
 
             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
@@ -2099,6 +2284,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     if (ioVariable == IoVariable.UserDefined)
                     {
                         varType = context.Definitions.GetUserDefinedType(location, isOutput);
+                    }
+                    else if (ioVariable == IoVariable.UserDefinedPerVertex)
+                    {
+                        varType = AggregateType.Vector4 | AggregateType.FP32;   // nxnative: LDTRAM's inputs (Declarations.DeclareInputOrOutput)
                     }
                     else if (ioVariable == IoVariable.FragmentOutputColor)
                     {
