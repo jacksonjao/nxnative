@@ -125,6 +125,10 @@ def main():
     replace_symlink(sources, tv / 'Sources', directory=True)
     # The settings screen (Sources/TVLauncher.swift) runs on the iPhone's and Mac's settings model, and shows the game's icon: a layered tvOS icon cannot be read back
     replace_symlink(gen / 'LauncherSettings.swift', tv.parent / 'ios' / 'Sources' / 'LauncherSettings.swift')
+    # The settings' Save sync choice and iCloud through CloudKit, the iPhone's and Mac's code (Sources/TVSaveSync.m calls it; docs/cloudkit-saves.md)
+    for n in ('SaveBackend.swift', 'SaveBackendSection.swift'): replace_symlink(gen / n, tv.parent / 'ios' / 'Sources' / n)
+    from cloudkit_tv import setup as cloudkit_setup
+    ck_info, ck_settings = cloudkit_setup(gen)
     shutil.copyfile(icon, gen / 'dm' / 'icon.jpg')   # UIImage reads it by its content (a PNG)
     (out / 'project.yml').write_text(f'''name: DmTV
 configFiles:
@@ -141,6 +145,8 @@ targets:
       - path: Gen/main/main.c
         compilerFlags: -Dmain=dm_main
       - path: Gen/LauncherSettings.swift
+      - path: Gen/SaveBackend.swift
+      - path: Gen/SaveBackendSection.swift
       - path: Gen/TVAssets.xcassets
       - path: Gen/embed.S
       - path: Gen/dm
@@ -153,7 +159,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         DMLanguage: {a.language}
-        DMShaderArchiveSHA256: '{a.shader_archive_sha256}'
+        DMShaderArchiveSHA256: '{a.shader_archive_sha256}'{ck_info}
         GCSupportsControllerUserInteraction: true
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
@@ -170,7 +176,7 @@ targets:
       MARKETING_VERSION: '{a.version}'
       CURRENT_PROJECT_VERSION: '{a.build_number}'
       ASSETCATALOG_COMPILER_APPICON_NAME: App Icon & Top Shelf Image
-      DEVELOPMENT_TEAM: {a.team}
+      DEVELOPMENT_TEAM: {a.team}{ck_settings}
       CODE_SIGN_STYLE: Automatic
       ENABLE_USER_SCRIPT_SANDBOXING: NO
       CLANG_ENABLE_OBJC_ARC: YES

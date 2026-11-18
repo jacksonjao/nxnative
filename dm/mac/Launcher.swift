@@ -30,6 +30,7 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                SaveBackendSection()   // where the save syncs through (dm/ios/Sources/SaveBackend.swift)
                 CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}

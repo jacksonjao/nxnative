@@ -265,6 +265,7 @@ private struct TVLauncherView: View {
                     Text(tr(section)).font(.headline).foregroundStyle(.secondary)
                 }
             }
+            SaveBackendSection()   // where the save syncs through: this Apple TV or iCloud (dm/ios/Sources/SaveBackend.swift)
             Section {
                 Button(action: reset) {
                     Text(tr("Reset settings")).font(.body.weight(.medium)).foregroundStyle(Color(red: 0.85, green: 0.12, blue: 0.12))   // a red that reads on the dark row and on the white focused one (the destructive role's turns pale there)

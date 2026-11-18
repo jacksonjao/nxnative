@@ -143,6 +143,7 @@ private struct LauncherView: View {
                     } footer: {
                         Text(LauncherText.display("Brings back all settings this game was tested with."))
                     }
+                    SaveBackendSection()   // where the save syncs through (SaveBackend.swift)
                     CloudSavesSection()
                     Section {
                         HStack {

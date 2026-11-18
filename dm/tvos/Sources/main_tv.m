@@ -113,7 +113,9 @@ static void *run_host(void *unused) {
     dm_main(2, host_argv);
     return NULL;
 }
+int dm_save_backend_env(void);   // dm/ios/Sources/SaveBackend.h: the settings' Save sync choice (this Apple TV or iCloud) as DM_SAVE_SYNC
 void front_tv_start(void) {
+    dm_save_backend_env();
     if (resources_pending) {
         if (!preparation_started) {
             pthread_attr_t attr;

@@ -17,6 +17,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools'))
 import romfs as rfs
+sys.path.insert(0, str(HERE))
+import cloudkit_mac   # iCloud through CloudKit: DM_CLOUDKIT_CONTAINER, DM_MAC_PROVISIONING_PROFILE
 MODULE_FILES = ('*.patched.bin', '*.fixups.tsv', '*.gates.tsv', '*.cuts.tsv', '*.obs.tsv', '*.changed.tsv', 'nro.tsv')   # what the host reads from the module folder (build_ipa.sh copies the same tables but changed.tsv: the iPhone's cheats never write code)
 MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json)
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
@@ -81,7 +83,7 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
 
 
 def swift_sources():   # the settings window, with the iOS launcher's model and rows
-    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift']
+    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift'] + cloudkit_mac.swift_sources(HERE.parent)
 
 
 def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
@@ -119,6 +121,7 @@ def info_plist(a, minos, icon):
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US'}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
+    cloudkit_mac.info(p)   # DMCloudKitContainer with DM_CLOUDKIT_CONTAINER
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
         p['DMSettings'] = settings_rules(listed)
@@ -138,11 +141,12 @@ def source_commit():   # DMCommit: the checkout that packed the app (scripts/bug
 
 def sign(app, identity, codesign):   # the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
     host = app / 'Contents/MacOS/dmhost'
+    ck = cloudkit_mac.sign_args(app)   # the launcher's iCloud entitlements, with DM_MAC_PROVISIONING_PROFILE
     for target in (host, app):
-        try: run([codesign, '--force', '--sign', identity, target])
+        try: run([codesign, '--force', '--sign', identity, *(ck if target == app else ()), target])
         except SystemExit as e:
             if 'detritus' not in str(e): raise
-            run(['xattr', '-cr', app]); run([codesign, '--force', '--sign', identity, target])   # Finder information or resource forks on copied files: codesign refuses them
+            run(['xattr', '-cr', app]); run([codesign, '--force', '--sign', identity, *(ck if target == app else ()), target])   # Finder information or resource forks on copied files: codesign refuses them
 
 
 def digest(path):

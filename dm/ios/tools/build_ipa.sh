@@ -20,6 +20,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 IOS_SOURCE=$PWD; IOS=$PWD; DM=$(cd .. && pwd)
+. "$IOS_SOURCE/tools/cloudkit_build.sh"   # iCloud through CloudKit: DM_CLOUDKIT_CONTAINER (ck_info, ck_entitlements)
 # Shader builds can run in parallel, but IPA mode mutates this checkout's Gen/.
 # Hold the lock across Xcode and packing so another title cannot replace it.
 if [ "${1:-}" != --prepare-xcode ] && [ "${DM_IOS_BUILD_LOCK_OWNER:-}" != "$$" ]; then
@@ -167,6 +168,7 @@ if [ "$PREPARE_XCODE" = YES ] && [ -n "${DM_ENTITLEMENTS-default}" ]; then
   if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" Gen/DmIOS.entitlements || die "copy DM_ENTITLEMENTS"
   else printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
     '<plist version="1.0"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>' > Gen/DmIOS.entitlements || die "entitlements"; fi
+  ck_entitlements Gen/DmIOS.entitlements   # iCloud through CloudKit (cloudkit_build.sh)
   echo "CODE_SIGN_ENTITLEMENTS = Gen/DmIOS.entitlements" >> Gen/dm.xcconfig
   t "entitlements: $(plutil -convert json -o - Gen/DmIOS.entitlements)"
 fi
@@ -177,6 +179,7 @@ xcodegen generate -q > /dev/null || die "xcodegen"
 COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
   /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
 case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
+ck_info Gen/Info.plist   # DMCloudKitContainer (cloudkit_build.sh)
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
 if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
 DM_RESOURCE_BUILD=${PKG:-} GAME=$GAME python3 tools/gen_resources.py "$IOS" "$ROMFS" "$MARKER" "$MSL_IOS/$MSLDIR" "$MSLDIR" "$AOC" "$XCODE_DD" "$DM/gfx/nvn/dmsh_chain.h" "$PSO" || die "generate Xcode resource paths"
@@ -211,6 +214,7 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" "$ENT" || die "copy DM_ENTITLEMENTS"
   else printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
     '<plist version="1.0"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>' > "$ENT" || die "entitlements"; fi
+  ck_entitlements "$ENT"   # iCloud through CloudKit (cloudkit_build.sh)
   EXE=$APP/DmIOS; [ ! -f "$APP/Info.plist" ] || EXE=$APP/$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist") || die "CFBundleExecutable of $APP"
   xattr -cr "$EXE" 2> /dev/null   # codesign refuses a file with a resource fork, Finder information or quarantine attributes
   codesign --force --sign - --entitlements "$ENT" "$EXE" || die "ad-hoc signature with the entitlements"
