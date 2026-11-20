@@ -14,6 +14,9 @@
 // Command list format (SDK 16): header +0x04 command count, +0x08 mix buffer address, +0x10 buffer count, +0x14 samples per frame, +0x18 sample rate, commands from +0x20;
 //   each command +0x00 magic 0xcafebabe, +0x04 enabled, +0x05 command ID (DeviceSink = 0x13), +0x06 size; DeviceSink +0x128 upsampler buffer, +0x130 input count, +0x134 input indices (s16).
 #include "hle.h"
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -109,6 +112,8 @@ typedef struct {
     _Atomic uint64_t frames, nonsilent, updates, renders, catchups;
     uint64_t last_r; int updated;            // the render count at the last update, once there was one
     int16_t cq[CQ][FRAME_MAX * DM_AUDIO_SINK_CHANNELS]; int cq_n[CQ]; uint32_t cq_head, cq_tail;   // output queue of catch-up frames
+    // A fresh render holds cq_mu while the SDK signals the renderer event. A woken guest thread can enter RequestUpdate and need cq_mu before the signal's handoff returns.
+    // Take the mutex with dm_host_lock so a thread waiting for it counts as blocked.
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // serializes catch-up publication, dequeue and fresh renders; wake on enqueue, dequeue or close
     int sink_logged;
     int32_t up_buf[DM_AUDIO_SINK_CHANNELS * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
@@ -132,6 +137,30 @@ static ar_t *ar_of_sys(uint8_t *sys) {
     return found;
 }
 
+// QoS alone does not give this 5 ms producer a deadline: late wakeups drain the output even when mixing takes only 0.07 ms (#3059).
+// The computation is a scheduling budget, not busy time. Keep output setup/teardown outside real-time policy and preserve burst-refill pacing.
+static int render_rt(void) {
+    const char *e = getenv("DM_AUDREN_RT");
+    if (e && atoi(e) == 0) { LOG("audren: render thread keeps its default policy (DM_AUDREN_RT=0)"); return 0; }
+    mach_timebase_info_data_t tb;
+    kern_return_t kr = mach_timebase_info(&tb);
+    if (kr == KERN_SUCCESS) {
+        thread_time_constraint_policy_data_t p = {
+            .period = (uint32_t)(5000000ull * tb.denom / tb.numer),
+            .computation = (uint32_t)(1000000ull * tb.denom / tb.numer),
+            .constraint = (uint32_t)(5000000ull * tb.denom / tb.numer), .preemptible = TRUE
+        };
+        kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    }
+    LOG("%saudren: render thread time-constraint policy (requested period 5 ms, computation 1 ms) %s (%d)", kr == KERN_SUCCESS ? "" : "[RED] ",
+        kr == KERN_SUCCESS ? "set" : "failed to set; keeping default policy", (int)kr);
+    return kr == KERN_SUCCESS;
+}
+static void render_rt_end(void) {
+    kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_STANDARD_POLICY, NULL, THREAD_STANDARD_POLICY_COUNT);
+    if (kr != KERN_SUCCESS) LOG("[RED] audren: cannot restore render thread default policy (%d)", (int)kr);
+}
+
 static void render_main(void *arg) {
     ar_t *a = arg; t_ar = a;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
@@ -142,6 +171,7 @@ static void render_main(void *arg) {
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
     uint64_t next_exec = 0;
     int prefill = NBUF;
+    int rt = render_rt();
     while (atomic_load(&a->open)) {
         while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             aout_buf *b = dm_pcmout_released(out);
@@ -150,7 +180,7 @@ static void render_main(void *arg) {
             if (!atomic_load(&a->open)) break;
         }
         if (!nfree) break;
-        pthread_mutex_lock(&a->cq_mu);
+        dm_host_lock(&a->cq_mu);
         // Leave some slack below the 5 ms block duration. Device callbacks can return several blocks at once,
         // but back-to-back SDK renders can coalesce their events before the game can update.
         while (!prefill && a->cq_head == a->cq_tail && atomic_load(&a->open)) {
@@ -182,6 +212,7 @@ static void render_main(void *arg) {
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
         else if (prefill) prefill--;
     }
+    if (rt) render_rt_end();
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
 }
 
@@ -287,7 +318,7 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close 
     ar_t *a = NULL;
     for (int i = 0; i < AR_MAX && !a; i++) if (g_ar[i].handle[0] == obj) a = &g_ar[i];
     if (a && a->render_tt) {
-        pthread_mutex_lock(&a->cq_mu);
+        dm_host_lock(&a->cq_mu);
         atomic_store(&a->open, 0);
         pthread_cond_broadcast(&a->cq_cv);
         pthread_mutex_unlock(&a->cq_mu);
@@ -604,7 +635,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     ar_t *a = ar_of_sys(sys);
     if (!a) return orig(sys, o, on, p, pn, in, inn);   // two renderers just opened, neither has rendered: at most one catch-up frame less
     uint64_t u = atomic_fetch_add(&a->updates, 1) + 1;
-    pthread_mutex_lock(&a->cq_mu);
+    dm_host_lock(&a->cq_mu);
     if (atomic_load(&a->open) && a->updated && atomic_load(&a->renders) == a->last_r) {
         uint64_t c = atomic_fetch_add(&a->catchups, 1) + 1;
         if (c <= 3) LOG("audren: renderer %d: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", ar_index(a), (unsigned long long)u, (unsigned long long)c);
@@ -624,7 +655,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     if (u < 200 && getenv("DM_AUDREN_TRACE")) LOG("audren update #%llu t=%.3f ms, %llu frames rendered since the last update", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&a->renders) - (a->updated ? a->last_r : 0)));
     pthread_mutex_unlock(&a->cq_mu);
     Result res = orig(sys, o, on, p, pn, in, inn);
-    pthread_mutex_lock(&a->cq_mu);
+    dm_host_lock(&a->cq_mu);
     a->last_r = atomic_load(&a->renders); a->updated = 1;
     pthread_mutex_unlock(&a->cq_mu);
     return res;

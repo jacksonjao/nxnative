@@ -4,6 +4,7 @@
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
 # publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
+# The build script can use a numeric display version label from the selected package after checking control data and the profile.
 # A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
 # leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
 # and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
@@ -11,7 +12,7 @@
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
-#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content)
+#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content); an update without an icon has its base game's
 #   extract/v<version>/romfs_programs/<index>.img   for an application of several programs (a Switch 2 Edition of a Switch 1 game), the RomFS of each program not packed, which the
 #                                       packed one mounts by program index (nn::fs::MountRom(name, index, ...), hle_fs.c); --program picks the program, default the highest index
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − the NACP's AddOnContentBaseId, else − base title ID − 0x1000), the host's DM_AOC_DIR
@@ -20,7 +21,7 @@
 # or, after a packer update, an image whose bytes check against the container's hashes.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # Usage: pack_nup.py <game.nup> [--version N] [--program N] [--work-dir DIR]   (exit 1 on error)
-import argparse, hashlib, mmap, os, shutil, struct, sys
+import argparse, hashlib, mmap, os, re, shutil, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
@@ -43,7 +44,7 @@ NO_DIR = 0xFFFFFFFF
 BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
-T_NACP, T_ICON, T_LICONS = 2, 3, 10
+T_NACP, T_ICON, T_DISPLAY, T_LICONS = 2, 3, 4, 10
 ARTIFACTS = romfs_image.ARTIFACTS   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
@@ -386,16 +387,31 @@ def pick(tags, code):   # the record for a language code: the exact tag, then it
     return tags.get(code) or tags.get(code.split('-')[0])
 
 
+def display_label(k):
+    """The selected package's numeric display label, bounded to the console's 15 version bytes."""
+    raw = k.meta().get(T_DISPLAY, b'')
+    if raw == f'v{k.version}'.encode('ascii'): return ''   # a package version tag, e.g. v131072
+    label = raw.removeprefix(b'v')
+    return label.decode('ascii') if len(label) <= 15 and re.fullmatch(rb'[0-9]+(?:\.[0-9]+){0,2}', label) else ''
+
+
 def app_package(n):   # the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package
     return next((k for k in n.packages if k.kind == BASE), n.packages[0])
 
 
-def control(k, out, fallback=None):   # the package's control data beside its ExeFS; what it lacks comes from fallback
+def icon_of(meta):   # a package's icon among its records: the icon, else the American English one of its localized icons, else the first of them
+    icons = localized(meta.get(T_LICONS, b''))
+    return meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
+
+
+def control(k, out, fallback=None, base=None):
+    """The package's control data beside its ExeFS; what it lacks comes from fallback. An update without an icon takes its base game's (base): the NSP script reads the base game's
+    control data in the folder the base is extracted to alone, and a build that packs only the update makes none (The Legend of Zelda: Ocarina of Time v131072: the app had no icon).
+    The NACP stays the package's own: its display version and languages are that version's"""
     meta = fallback.meta() if fallback is not None else {}
     meta.update(k.meta())
     nacp_bytes = meta.get(T_NACP)
-    icons = localized(meta.get(T_LICONS, b''))
-    icon = meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
+    icon = icon_of(meta) or (icon_of(base.meta()) if base is not None and base is not k else None)
     for name, data in (('control.nacp', nacp_bytes), ('icon.jpg', icon)):
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
@@ -428,7 +444,7 @@ def pack_version(n, k, base, app, out, say=print, step=lambda s: None):
     for name, sd in others.items():
         say(f'program {name.removesuffix(".img")} of the application ({n.siblings[int(name.removesuffix(".img"))][0]:016X}): its RomFS → {PROGRAMS}/{name}')
         pack(n, sd, progs / name, say, step)
-    control(k, out, app_package(n) if base is None else None)
+    control(k, out, app_package(n) if base is None else None, base)
     return how
 
 

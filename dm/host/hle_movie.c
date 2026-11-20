@@ -244,7 +244,6 @@ static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
 // g_dfmu and each decoder's dmu are held while guest code signals events, so guest threads take them with dm_host_lock: a thread waiting for one counts as blocked, and the
 // signaller's handoff does not wait for it (Kirby and the Forgotten Land froze at its first guide movie: the handoff waited for the input thread, which waited for dmu)
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size);
-void dm_host_lock(pthread_mutex_t *m);   // hle_thread.c
 static pthread_mutex_t g_dfmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_dfcv = PTHREAD_COND_INITIALIZER;
 static struct { void *d; int ev; uint64_t due; } g_dfq[64]; static int g_ndfq, g_dfthr;
 static void md_defer_body(void *arg);
@@ -896,7 +895,11 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
     pthread_mutex_unlock(&d->mu);
-    if (!r && !MD_AUDIO(d)) dm_movie_picture(d, "nn::movie", *pts * 1000, 30);   // its times are in µs
+    if (!r && !MD_AUDIO(d)) {
+        dm_movie_picture(d, "nn::movie", *pts * 1000, 30);   // its times are in µs
+        // Deferred notifications coalesce. A client taking one output per event still needs a wake for the rest of the batch.
+        if (*left) md_pump_ev(d, 1);
+    }
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }

@@ -114,6 +114,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Found on:** Mario Strikers: Battle League 1.3.2 (no profile), with a frame-stamped `DM_KEYS` script that skips the intro and changes menus (`f150:A~f5,f210:A~f7,f270:L-0.2/-0.9~f3,f280:L-0.2/-0.9~f3,f300:A~f5,f350:A~f5`), on two Macs: 3 of 4 runs crashed before; with the decoder's thread, 0 of 30 on one and 2 of 12 on the other ([seedds/nxnative#762](https://github.com/seedds/nxnative/pull/762)). Its provisional profile had `core_preempt on`; that key alone did not stop the crash.
 - **Check:** `t_movie_avc`: after a decode, the output event is queued for the deferred thread, due at once, not signalled on the decoding thread.
 
+### A completed video batch needs another output event
+
+- **Symptom:** Super Mario Sunshine freezes at the first M graffiti while music continues. Hagi waits for frame 286 of `EX128x144_q0.mp4` with 14 pictures and an end-of-stream output ready in the host.
+- **Cause:** the host coalesces deferred video events. Hagi takes one output per auto-cleared event, and a completed AVC drain has no further decode work to signal the outputs still queued.
+- **Fix:** after a successful video acquisition, `h_movie_AcqOut` re-arms the deferred output event if more outputs are ready. `t_movie_avc` takes one output per event through the end of a synthetic drain.
+- **Found on:** [Super Mario Sunshine](../../dm/games/010049900F546002/README.md) in [issue #2990](https://github.com/seedds/nxnative/issues/2990).
+
 ### `Flush`, `Stop` and `Start`
 
 - **Fix:** as with MediaCodec, `Flush` announces nothing, and no input or output index is handed out while the decoder is stopped. The "input available" after `Start` is signalled about 2 ms later from a guest thread, as the SDK's codec thread would. Pending signals are dropped at `Stop`, `Flush` and destruction.
@@ -271,7 +278,7 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Symptom:** a native-texture movie jumps ahead for one picture and returns: every 17 pictures, each exactly 16 ahead (one cycle of the video output slots), the picture before it never shown. Text burnt into the movie shows the line being typed half a second later for one frame.
 - **Cause:** the host returned a native-texture slot inside `GetOutputBuffer` (the entry above), and returning a slot decodes the next queued packet into it within the call and signals the output event. The player's decoder thread acquired the slot again before its output thread's own `ReleaseOutputBufferIndex` for the old picture came, and that release then freed the new picture; the slot was filled once more, a cycle ahead. The SDK returns the index there too, but its hardware decoder fills it later, so the client's release always comes first.
 - **Fix** (`hle_movie.c`, `md_rendered`): a slot written into the client's texture is kept until the client releases it, or, for a client that has never released a rendered slot itself (Super Mario Party Jamboree, Metroid Prime 4: Beyond), until its next `GetOutputBuffer`. A decoder learns which kind its client is at the client's first release of a rendered slot; the earlier slots are returned under the same lock that checks them.
-- **Found on:** TSUKIHIME -A piece of blue glass moon- (010057A01E4D4000, no profile here; [GitHub issue #700](https://github.com/seedds/nxnative/issues/700): its prologue, a 1080p H.264 movie, `type 1 output 3 mode 2`) and [Metroid Dread](../../dm/games/010093801237C000/README.md#movies), whose movies jumped the same way (15 times in 75 s on the Mac before, none after).
+- **Found on:** [TSUKIHIME A piece of blue glass moon](../../dm/games/010057A01E4D4000/README.md) ([GitHub issue #700](https://github.com/seedds/nxnative/issues/700), its prologue, a 1080p H.264 movie, `type 1 output 3 mode 2`) and [Metroid Dread](../../dm/games/010093801237C000/README.md#movies), whose movies jumped the same way (15 times in 75 s on the Mac before, none after).
 
 ### A BGRA8 client texture gets its movie with red and blue swapped
 

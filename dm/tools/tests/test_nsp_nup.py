@@ -353,6 +353,19 @@ class ImageReuse(Base):
 
 
 class Pack(Base):
+    def test_display_label_is_numeric_and_belongs_to_the_package(self):
+        labels = [(b'1.1.1', '1.1.1'), (b'v1.8.0', '1.8.0'), (b'2.1', '2.1'), (b'4', '4'),
+                  (b'', ''), (b'1.8.0 beta', ''), (b'1.2.3.4', ''), ('١.٢.٣'.encode(), ''),
+                  (b'1.2\0', ''), (b'1' * 16, ''), (f'v{VER + 10}'.encode(), '')]
+        packages = [(0, TID, 0, version(), tlv([(pack_nup.T_DISPLAY, b'9.9.9')]))]
+        packages += [(1, TID, VER + i, version(), tlv([(pack_nup.T_DISPLAY, raw)]) if raw else b'')
+                     for i, (raw, _) in enumerate(labels)]
+        write_nup(self.path, packages)
+        _, _, updates, _ = pack_nup.scan(self.open())
+        for i, (raw, expected) in enumerate(labels):
+            with self.subTest(raw=raw):
+                self.assertEqual(pack_nup.display_label(updates[VER + i]), expected)
+
     def out(self): return self.dir / 'out'
 
     def test_standalone_updates_keep_their_versions_and_dlc(self):
@@ -438,6 +451,21 @@ class Pack(Base):
         pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=lambda s: None)
         self.assertIn('dir/base', romfs_image.read_index(self.out() / 'RomFS.img'))
         self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'updated')
+
+    def test_update_without_an_icon_takes_its_base_games(self):   # a build may pack only the update: Ocarina of Time's NUP has the icon on its base record, and the Mac app had none
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        u = self.out() / 'u'; pack_nup.pack_version(n, vers[VER], base, app, u, say=lambda s: None)
+        self.assertEqual((u / 'icon.jpg').read_bytes(), b'\xff\xd8 icon')
+        self.assertFalse((u / 'control.nacp').exists())   # the NACP stays the package's own: its display version and languages are that version's
+        self.assertEqual(nsp.app_icon(None, None, u, u), (u / 'icon.jpg', False))   # what the script reads when no folder holds the base game alone
+        licons = lambda d: b''.join(bytes([len(t)]) + t.encode() + struct.pack('<I', len(b)) + b for t, b in d.items())   # the localized icons record (SPEC 0x000A)
+        for base_meta, own, want in ((META, tlv([(pack_nup.T_ICON, b'new icon')]), b'new icon'),                                                  # the update's own icon stays
+                                     (tlv([(pack_nup.T_LICONS, licons({'ja': b'ja icon', 'en-US': b'en icon'}))]), b'', b'en icon'),                # the base game's localized icons
+                                     (b'', b'', None)):                                                                                             # none anywhere: none written, an earlier one goes
+            write_nup(self.path, [(0, TID, 0, version(), base_meta), (1, TID, VER, version(), own)])
+            n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+            pack_nup.pack_version(n, vers[VER], base, app, u, say=lambda s: None)
+            self.assertEqual((u / 'icon.jpg').read_bytes() if (u / 'icon.jpg').exists() else None, want)
 
     def test_mismatched_program_ids_refused(self):
         write_nup(self.path, [(0, TID, 0, version(), b''), (1, TID, VER, version(tid=TID + 0x2000), b'')])
@@ -661,6 +689,30 @@ class StandaloneCLI(Base):
 
 
 class Main(Base):
+    def test_app_version_from_a_nup_when_only_the_update_is_extracted(self):
+        tid, ver = 0x0400486024DEC000, 131072
+        from game import Game
+        row = Game(REPO / 'dm/games' / f'{tid:016X}').builds()[f'v{ver}']
+        update = version(tid=tid)
+        for module, bid in row.items():
+            if module != 'display': update['exefs'][module] = b'NSO0' + bytes(0x3c) + bytes.fromhex(bid)
+        npdm64 = bytearray(update['exefs']['main.npdm']); npdm64[0xc] = 1
+        update['exefs']['main.npdm'] = bytes(npdm64)
+        label = tlv([(pack_nup.T_DISPLAY, b'v1.1.1')])
+        base_label = tlv([(pack_nup.T_DISPLAY, b'1.0.0')])
+        update_nacp = tlv([(pack_nup.T_NACP, control_nacp('Test Game', '', '2.3.4'))])
+        sources = {'graphics': ('gl', 'test'), 'gl_capture': (False, '')}
+        for expected, base_meta, update_meta in (('1.1.1', base_label, label), ('1.0', base_label, b''),
+                                                 ('1.2.3', META, label), ('2.3.4', META, label + update_nacp)):
+            with self.subTest(expected=expected):
+                write_nup(self.path, [(0, tid, 0, version(tid=tid), base_meta), (1, tid, ver, update, update_meta)])
+                with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+                     mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'build_sources', return_value=sources), \
+                     mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'say_game', side_effect=Stop) as app:
+                    with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path), '--platform', 'ios']))
+                self.assertEqual(app.call_args.args[2], expected)
+                self.assertFalse((self.dir / f'{tid:016X}_build/extract/v0').exists())
+
     def run_main(self, target, *, extract=False, package=None):
         seen, said = {}, []
         def stop(env, *a):
